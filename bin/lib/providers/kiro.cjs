@@ -150,8 +150,17 @@ function syncCurrentAuth() {
 
   writeStore(store);
 
-  // Active = last switched via oas, or fallback to token file match
-  const currentKey = store.activeKey || null;
+  // Active = last switched via oas, or fallback to matching current token file
+  let currentKey = store.activeKey || null;
+  if (!currentKey) {
+    const activeAuth = readJson(AUTH_PATH);
+    if (activeAuth) {
+      const fileKey = getAccountKey(activeAuth);
+      if (fileKey && store.accounts.some((a) => a.key === fileKey)) {
+        currentKey = fileKey;
+      }
+    }
+  }
 
   return { store, currentKey };
 }
