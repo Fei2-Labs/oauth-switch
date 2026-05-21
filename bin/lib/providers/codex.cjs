@@ -131,7 +131,8 @@ function listAccounts() {
     console.log(`  [${index}] ${account.displayName}${marker}`);
   });
   console.log('');
-  console.log('Switch: oas codex <index>');
+  console.log('Switch: oas codex <index|name>');
+  console.log('Alias:  oas codex alias <index> <name>');
   console.log('Remove: oas codex remove <index>');
 }
 
@@ -204,7 +205,7 @@ function runCodex(args) {
     return;
   }
 
-  if (subcommand === 'label') {
+  if (subcommand === 'alias') {
     labelAccount(args[1], args.slice(2).join(' '));
     return;
   }

@@ -161,9 +161,9 @@ function listAccounts() {
     console.log(`  [${index}] ${account.displayName}${expired}${marker}`);
   });
   console.log('');
-  console.log('Switch: oas kiro <index>');
+  console.log('Switch: oas kiro <index|name>');
+  console.log('Alias:  oas kiro alias <index> <name>');
   console.log('Remove: oas kiro remove <index>');
-  console.log('Label:  oas kiro label <index> <name>');
 }
 
 async function switchAccount(index) {
@@ -386,7 +386,7 @@ async function runKiro(args) {
     return;
   }
 
-  if (subcommand === 'label') {
+  if (subcommand === 'alias') {
     labelAccount(args[1], args.slice(2).join(' '));
     return;
   }
