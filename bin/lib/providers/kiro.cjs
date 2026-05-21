@@ -40,9 +40,9 @@ function backupFile(filePath) {
 }
 
 function getAccountKey(auth) {
-  // profileArn is the most stable unique identifier per account
-  if (auth && auth.profileArn) return `kiro:${auth.profileArn}`;
-  if (auth && auth.accessToken) return `kiro:${auth.accessToken.slice(0, 24)}`;
+  // refreshToken is unique per account — use it as the stable key
+  if (auth && auth.refreshToken) return `kiro:rt:${auth.refreshToken.slice(0, 24)}`;
+  if (auth && auth.accessToken) return `kiro:at:${auth.accessToken.slice(0, 24)}`;
   return null;
 }
 
