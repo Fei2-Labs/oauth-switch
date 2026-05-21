@@ -241,7 +241,9 @@ async function refreshAndSwitch(target, store, idx) {
 
   const SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK';
   const BUILDER_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX';
-  const resolvedProfileArn = auth.profileArn || (isSocial ? SOCIAL_PROFILE_ARN : BUILDER_PROFILE_ARN);
+  // Use stored profileArn if it's a real value (not the placeholder)
+  const storedArn = auth.profileArn && auth.profileArn !== BUILDER_PROFILE_ARN ? auth.profileArn : null;
+  const resolvedProfileArn = storedArn || (isSocial ? SOCIAL_PROFILE_ARN : null);
 
   let newAccessToken = auth.accessToken;
   let newRefreshToken = auth.refreshToken;
@@ -251,8 +253,8 @@ async function refreshAndSwitch(target, store, idx) {
     if (result.success) {
       newAccessToken = result.accessToken;
       newRefreshToken = result.refreshToken || auth.refreshToken;
-    } else if (result.error && result.error.includes('invalid_grant')) {
-      console.log(`Token expired for [${idx}] ${target.displayName}.`);
+    } else if (result.error && /invalid_grant|access_denied|unauthorized|expired/i.test(result.error)) {
+      console.log(`Token expired or access denied for [${idx}] ${target.displayName}.`);
       console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
       process.exitCode = 1;
       return;
@@ -266,14 +268,20 @@ async function refreshAndSwitch(target, store, idx) {
       if (result.success) {
         newAccessToken = result.accessToken;
         newRefreshToken = result.refreshToken || auth.refreshToken;
-      } else if (result.error && result.error.includes('invalid_grant')) {
-        console.log(`Token expired for [${idx}] ${target.displayName}.`);
+      } else if (result.error && /invalid_grant|access_denied|unauthorized|expired/i.test(result.error)) {
+        console.log(`Token expired or access denied for [${idx}] ${target.displayName}.`);
         console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
         process.exitCode = 1;
         return;
       } else {
         console.log(`Warning: token refresh failed (${result.error}), using existing token.`);
       }
+    } else {
+      console.log(`No client registration found for [${idx}] ${target.displayName}.`);
+      console.log('Enterprise account may require re-authentication.');
+      console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
+      process.exitCode = 1;
+      return;
     }
   }
 
@@ -282,7 +290,7 @@ async function refreshAndSwitch(target, store, idx) {
   const tokenData = isSocial ? {
     accessToken: newAccessToken,
     refreshToken: newRefreshToken,
-    profileArn: resolvedProfileArn,
+    ...(resolvedProfileArn && { profileArn: resolvedProfileArn }),
     expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
     authMethod: 'social',
     provider: canonicalProvider,
@@ -294,7 +302,7 @@ async function refreshAndSwitch(target, store, idx) {
     authMethod: auth.authMethod || 'IdC',
     provider: canonicalProvider,
     region: auth.region || 'us-east-1',
-    profileArn: resolvedProfileArn,
+    ...(resolvedProfileArn && { profileArn: resolvedProfileArn }),
   };
 
   writeJson(AUTH_PATH, tokenData);
@@ -312,7 +320,6 @@ async function refreshAndSwitch(target, store, idx) {
   writeStore(store);
 
   console.log(`Switched Kiro to [${idx}] ${target.displayName}.`);
-  console.log('Restart Kiro IDE for the change to take effect.');
 }
 
 function findClientRegistration(clientIdHash) {

@@ -23,11 +23,13 @@ Pool multiple OAuth accounts for **Claude Code** and **OpenAI Codex**, switch be
 
 | Feature | Description |
 |---------|-------------|
-| 🔄 **Instant switch** | One command to swap the active account |
+| 🔄 **Instant switch** | One command to swap the active account — by index or alias |
 | 📊 **Usage monitoring** | See 5-hour and 7-day utilization per account |
 | ⚡ **Auto-switch** | Background daemon rotates to the best account before you hit limits |
 | 🖥️ **Menu bar app** | Native macOS app — see status, switch accounts, adjust thresholds |
 | 🔔 **Notifications** | macOS alerts when a switch happens |
+| 🔑 **Multi-provider** | Claude Code, Codex, and Kiro IDE — all in one tool |
+| 🏢 **Enterprise SSO** | Supports Builder ID, Google/GitHub social, and IAM Identity Center |
 
 ---
 
@@ -58,14 +60,32 @@ Make sure `~/.local/bin` is in your `PATH`.
 # List Claude Code accounts with usage
 oas
 
-# Switch to account by index
+# Switch to account by index or alias
 oas 2
+oas work
+
+# Set alias for Claude Code account
+oas alias 0 work
+
+# List Kiro accounts
+oas kiro
+
+# Switch Kiro account by index or alias
+oas kiro 1
+oas kiro work
+
+# Set alias for Kiro account
+oas kiro alias 0 personal
 
 # List Codex accounts
 oas codex
 
-# Switch Codex account
+# Switch Codex account by index or alias
 oas codex 1
+oas codex personal
+
+# Set alias for Codex account
+oas codex alias 0 personal
 
 # Run auto-switch check manually
 oas auto
@@ -74,7 +94,7 @@ oas auto
 oas sync
 ```
 
-Accounts are captured automatically — just log in with different accounts and run `oas` each time.
+Accounts are captured automatically — just log in with different accounts and run `oas` (or `oas kiro` / `oas codex`) each time. Use `oas alias`, `oas kiro alias`, or `oas codex alias` to give accounts memorable names.
 
 ---
 
@@ -129,15 +149,33 @@ Features:
 ## How it works
 
 ```
+# Claude Code
 ~/.claude.json              ← Claude Code reads config from here
 ~/.claude/.credentials.json ← OAuth tokens live here
+
+# Codex
 ~/.codex/auth.json          ← Codex OAuth tokens
 
+# Kiro
+~/.aws/sso/cache/kiro-auth-token.json  ← Kiro IDE reads tokens from here
+
+# Stores
 ~/.ClaudeCodeMultiAccounts.json  ← oauth-switch store (Claude)
 ~/.CodexMultiAccounts.json       ← oauth-switch store (Codex)
+~/.KiroMultiAccounts.json        ← oauth-switch store (Kiro)
 ```
 
-`oauth-switch` snapshots each account's credentials when you use it. Switching replaces the live config files with the stored snapshot. Restart the CLI for changes to take effect.
+`oauth-switch` snapshots each account's credentials when you use it. Switching replaces the live config files with the stored snapshot and refreshes the token. Restart the CLI/IDE for changes to take effect.
+
+### Kiro account types
+
+| Type | How to capture |
+|------|---------------|
+| Builder ID | Log in via Kiro IDE, run `oas kiro` |
+| Google/GitHub | Log in via Kiro IDE, run `oas kiro` |
+| Enterprise SSO | Log in via Kiro IDE, run `oas kiro` |
+
+Token refresh is handled automatically on switch (OIDC for Builder ID/Enterprise, social endpoint for Google/GitHub).
 
 ---
 
