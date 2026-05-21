@@ -168,10 +168,9 @@ function listAccounts() {
 
 async function switchAccount(index) {
   const { store, currentKey } = syncCurrentAuth();
-  const idx = Number.parseInt(index, 10);
+  const idx = resolveAccountIndex(store.accounts, index);
 
-  if (Number.isNaN(idx) || idx < 0 || idx >= store.accounts.length) {
-    console.log(`Invalid index. Use 0–${store.accounts.length - 1}.`);
+  if (idx === null) {
     process.exitCode = 1;
     return;
   }
@@ -189,6 +188,25 @@ async function switchAccount(index) {
   }
 
   await refreshAndSwitch(target, store, idx);
+}
+
+function resolveAccountIndex(accounts, selector) {
+  const trimmed = String(selector).trim();
+  const numeric = Number.parseInt(trimmed, 10);
+  if (!Number.isNaN(numeric) && String(numeric) === trimmed) {
+    if (numeric < 0 || numeric >= accounts.length) {
+      console.log(`Invalid index. Use 0–${accounts.length - 1}.`);
+      return null;
+    }
+    return numeric;
+  }
+  // Match by displayName (alias)
+  const lower = trimmed.toLowerCase();
+  const byName = accounts.findIndex((a) => a.displayName && a.displayName.toLowerCase().includes(lower));
+  if (byName >= 0) return byName;
+
+  console.log(`No account matched '${trimmed}'. Use index or name.`);
+  return null;
 }
 
 async function refreshAndSwitch(target, store, idx) {
@@ -373,14 +391,8 @@ async function runKiro(args) {
     return;
   }
 
-  const numeric = Number.parseInt(subcommand, 10);
-  if (!Number.isNaN(numeric) && String(numeric) === subcommand) {
-    await switchAccount(subcommand);
-    return;
-  }
-
-  console.log(`Unknown kiro subcommand: ${subcommand}`);
-  process.exitCode = 1;
+  // Try as index or name
+  await switchAccount(subcommand);
 }
 
 module.exports = { runKiro, AUTH_PATH, CLI_AUTH_PATH, STORE_PATH };

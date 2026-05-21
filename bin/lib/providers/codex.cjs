@@ -137,10 +137,9 @@ function listAccounts() {
 
 function switchAccount(index) {
   const { store, currentKey } = syncCurrentAuth();
-  const idx = Number.parseInt(index, 10);
+  const idx = resolveCodexIndex(store.accounts, index);
 
-  if (Number.isNaN(idx) || idx < 0 || idx >= store.accounts.length) {
-    console.log(`Invalid index. Use 0–${store.accounts.length - 1}.`);
+  if (idx === null) {
     process.exitCode = 1;
     return;
   }
@@ -158,6 +157,23 @@ function switchAccount(index) {
 
   console.log(`Switched Codex to [${idx}] ${target.displayName}.`);
   console.log('Restart Codex for the change to take effect.');
+}
+
+function resolveCodexIndex(accounts, selector) {
+  const trimmed = String(selector).trim();
+  const numeric = Number.parseInt(trimmed, 10);
+  if (!Number.isNaN(numeric) && String(numeric) === trimmed) {
+    if (numeric < 0 || numeric >= accounts.length) {
+      console.log(`Invalid index. Use 0–${accounts.length - 1}.`);
+      return null;
+    }
+    return numeric;
+  }
+  const lower = trimmed.toLowerCase();
+  const byName = accounts.findIndex((a) => a.displayName && a.displayName.toLowerCase().includes(lower));
+  if (byName >= 0) return byName;
+  console.log(`No account matched '${trimmed}'. Use index or name.`);
+  return null;
 }
 
 function removeAccount(index) {
@@ -188,14 +204,31 @@ function runCodex(args) {
     return;
   }
 
-  const numeric = Number.parseInt(subcommand, 10);
-  if (!Number.isNaN(numeric) && String(numeric) === subcommand) {
-    switchAccount(subcommand);
+  if (subcommand === 'label') {
+    labelAccount(args[1], args.slice(2).join(' '));
     return;
   }
 
-  console.log(`Unknown codex subcommand: ${subcommand}`);
-  process.exitCode = 1;
+  // Try as index or name
+  switchAccount(subcommand);
+}
+
+function labelAccount(index, newLabel) {
+  const store = readStore();
+  const idx = Number.parseInt(index, 10);
+  if (Number.isNaN(idx) || idx < 0 || idx >= store.accounts.length) {
+    console.log(`Invalid index. Use 0–${store.accounts.length - 1}.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!newLabel) {
+    console.log('Usage: oas codex label <index> <name>');
+    process.exitCode = 1;
+    return;
+  }
+  store.accounts[idx].displayName = newLabel;
+  writeStore(store);
+  console.log(`Renamed [${idx}] to "${newLabel}".`);
 }
 
 module.exports = { runCodex };

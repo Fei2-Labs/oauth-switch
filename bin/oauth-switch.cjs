@@ -184,6 +184,12 @@ async function main() {
     return;
   }
 
+  const aliasIdx = rawArgs.indexOf('alias');
+  if (aliasIdx >= 0) {
+    runAlias(rawArgs.slice(aliasIdx + 1));
+    return;
+  }
+
   const options = parseArgs(rawArgs);
 
   try {
@@ -303,6 +309,27 @@ async function main() {
     console.log(`Switch failed: ${error.message}`);
     process.exitCode = 1;
   }
+}
+
+function runAlias(args) {
+  const index = args[0];
+  const alias = args.slice(1).join(' ');
+  if (!index || !alias) {
+    console.log('Usage: oas alias <index> <name>');
+    process.exitCode = 1;
+    return;
+  }
+  const idx = Number.parseInt(index, 10);
+  const store = normalizeStore(readJsonIfExists(getDefaultStorePath(), { version: STORE_VERSION, accounts: [] }), STORE_VERSION);
+  if (Number.isNaN(idx) || idx < 0 || idx >= store.accounts.length) {
+    console.log(`Invalid index. Use 0–${store.accounts.length - 1}.`);
+    process.exitCode = 1;
+    return;
+  }
+  store.accounts[idx].alias = alias;
+  writeStore(store, { storePath: getDefaultStorePath(), backupDir: getDefaultBackupDir() });
+  const name = store.accounts[idx].metadata?.emailAddress || `account ${idx}`;
+  console.log(`Set alias "${alias}" for [${idx}] ${name}.`);
 }
 
 async function runAutoSwitch() {
