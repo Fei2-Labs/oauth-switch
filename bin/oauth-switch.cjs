@@ -2,6 +2,7 @@
 
 const path = require('path');
 const { runCodex } = require('./lib/providers/codex.cjs');
+const { runKiro } = require('./lib/providers/kiro.cjs');
 const storeIo = require('./lib/store/io.cjs');
 const storeAccounts = require('./lib/store/accounts.cjs');
 const usageCache = require('./lib/usage/cache.cjs');
@@ -168,6 +169,12 @@ async function main() {
   const codexIdx = rawArgs.indexOf('codex');
   if (codexIdx >= 0) {
     runCodex(rawArgs.slice(codexIdx + 1));
+    return;
+  }
+
+  const kiroIdx = rawArgs.indexOf('kiro');
+  if (kiroIdx >= 0) {
+    runKiro(rawArgs.slice(kiroIdx + 1));
     return;
   }
 
