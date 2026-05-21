@@ -1,0 +1,35 @@
+{
+  "name": "oauth-switch",
+  "version": "1.1.0",
+  "description": "Multi-account switcher for Claude Code, Codex, and Kiro IDE with auto-switch on rate limits",
+  "bin": {
+    "oauth-switch": "./bin/oauth-switch.cjs",
+    "oas": "./bin/oauth-switch.cjs"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "kiro",
+    "oauth",
+    "multi-account",
+    "account-switch",
+    "rate-limit",
+    "cli"
+  ],
+  "author": "clarezoe",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fei2-Labs/oauth-switch.git"
+  },
+  "homepage": "https://github.com/Fei2-Labs/oauth-switch",
+  "engines": {
+    "node": ">=18"
+  }
+}

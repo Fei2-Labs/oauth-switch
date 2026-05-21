@@ -36,21 +36,21 @@ Pool multiple OAuth accounts for **Claude Code** and **OpenAI Codex**, switch be
 ## Quick start
 
 ```bash
-# Clone
-git clone https://github.com/Fei2-Labs/oauth-switch.git
-cd oauth-switch
+# Install globally
+npm i -g oauth-switch
 
-# Create the CLI wrapper
-mkdir -p ~/.local/bin
-cat > ~/.local/bin/oas << 'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-node "$(dirname "$(realpath "$0")")/../oauth-switch/bin/oauth-switch.cjs" --usage-command "oas" "$@"
-EOF
-chmod +x ~/.local/bin/oas
+# Or run directly
+npx oauth-switch
+
+# List Claude Code accounts
+oas
+
+# List Kiro accounts
+oas kiro
+
+# List Codex accounts
+oas codex
 ```
-
-Make sure `~/.local/bin` is in your `PATH`.
 
 ---
 
