@@ -130,6 +130,7 @@ function syncCurrentAuth() {
 
     if (idx >= 0) {
       entry.lastUsedAt = store.accounts[idx].lastUsedAt || now;
+      entry.displayName = store.accounts[idx].displayName || entry.displayName;
       store.accounts[idx] = { ...store.accounts[idx], ...entry };
     } else {
       store.accounts.push(entry);
@@ -138,9 +139,8 @@ function syncCurrentAuth() {
 
   writeStore(store);
 
-  // Determine active key from kiro-auth-token.json
-  const activeAuth = readJson(AUTH_PATH);
-  const currentKey = activeAuth ? getAccountKey(activeAuth) : null;
+  // Active = last switched via oas, or fallback to token file match
+  const currentKey = store.activeKey || null;
 
   return { store, currentKey };
 }
@@ -273,6 +273,7 @@ async function refreshAndSwitch(target, store, idx) {
   target.auth.accessToken = newAccessToken;
   target.auth.refreshToken = newRefreshToken;
   target.lastUsedAt = new Date().toISOString();
+  store.activeKey = target.key;
   writeStore(store);
 
   console.log(`Switched Kiro to [${idx}] ${target.displayName}.`);
