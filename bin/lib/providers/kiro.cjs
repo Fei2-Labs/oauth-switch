@@ -274,7 +274,10 @@ async function refreshAndSwitch(target, store, idx) {
   target.auth.refreshToken = newRefreshToken;
   target.auth.expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
   target.lastUsedAt = new Date().toISOString();
-  target.displayName = getDisplayName(target.auth);
+  // Only update displayName if it hasn't been manually aliased
+  if (!target._aliased) {
+    target.displayName = getDisplayName(target.auth);
+  }
   store.activeKey = target.key;
   writeStore(store);
 
@@ -372,6 +375,7 @@ function labelAccount(index, newLabel) {
   }
 
   store.accounts[idx].displayName = newLabel;
+  store.accounts[idx]._aliased = true;
   writeStore(store);
   console.log(`Renamed [${idx}] to "${newLabel}".`);
 }
