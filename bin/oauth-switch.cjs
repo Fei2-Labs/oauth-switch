@@ -174,7 +174,7 @@ async function main() {
 
   const kiroIdx = rawArgs.indexOf('kiro');
   if (kiroIdx >= 0) {
-    runKiro(rawArgs.slice(kiroIdx + 1));
+    await runKiro(rawArgs.slice(kiroIdx + 1));
     return;
   }
 
