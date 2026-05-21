@@ -129,9 +129,14 @@ function syncCurrentAuth() {
     };
 
     if (idx >= 0) {
-      entry.lastUsedAt = store.accounts[idx].lastUsedAt || now;
-      entry.displayName = store.accounts[idx].displayName || entry.displayName;
-      store.accounts[idx] = { ...store.accounts[idx], ...entry };
+      const existing = store.accounts[idx];
+      entry.lastUsedAt = existing.lastUsedAt || now;
+      // Preserve manually set alias
+      if (existing._aliased) {
+        entry.displayName = existing.displayName;
+        entry._aliased = true;
+      }
+      store.accounts[idx] = { ...existing, ...entry };
     } else {
       store.accounts.push(entry);
     }
