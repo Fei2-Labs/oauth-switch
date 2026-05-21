@@ -157,7 +157,7 @@ function listAccounts() {
   console.log('--- Kiro Accounts ---');
   store.accounts.forEach((account, index) => {
     const marker = account.key === currentKey ? ' ← active' : '';
-    const expired = account.auth?.expiresAt && new Date(account.auth.expiresAt) < new Date() ? ' [expired]' : '';
+    const expired = account.auth?.expiresAt && new Date(account.auth.expiresAt) < new Date() ? ' [token expired — re-login needed]' : '';
     console.log(`  [${index}] ${account.displayName}${expired}${marker}`);
   });
   console.log('');
@@ -203,17 +203,26 @@ async function refreshAndSwitch(target, store, idx) {
     if (result.success) {
       newAccessToken = result.accessToken;
       newRefreshToken = result.refreshToken || auth.refreshToken;
+    } else if (result.error && result.error.includes('invalid_grant')) {
+      console.log(`Token expired for [${idx}] ${target.displayName}.`);
+      console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
+      process.exitCode = 1;
+      return;
     } else {
       console.log(`Warning: token refresh failed (${result.error}), using existing token.`);
     }
   } else {
-    // Need clientId and clientSecret from the SSO cache
     const clientData = findClientRegistration(auth.clientIdHash);
     if (clientData) {
       const result = await refreshOidcToken(auth.refreshToken, clientData.clientId, clientData.clientSecret, auth.region || 'us-east-1');
       if (result.success) {
         newAccessToken = result.accessToken;
         newRefreshToken = result.refreshToken || auth.refreshToken;
+      } else if (result.error && result.error.includes('invalid_grant')) {
+        console.log(`Token expired for [${idx}] ${target.displayName}.`);
+        console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
+        process.exitCode = 1;
+        return;
       } else {
         console.log(`Warning: token refresh failed (${result.error}), using existing token.`);
       }
