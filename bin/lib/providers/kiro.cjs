@@ -46,24 +46,30 @@ function getAccountKey(auth) {
   return null;
 }
 
+function tryDecodeEmail(accessToken) {
+  if (!accessToken) return null;
+  const parts = accessToken.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return payload.email || payload.sub || null;
+  } catch (_) { return null; }
+}
+
 function getDisplayName(auth) {
+  // Try to get email from JWT
+  const email = tryDecodeEmail(auth.accessToken);
+  if (email && email.includes('@')) return email;
+
   const parts = [];
   if (auth.provider) parts.push(auth.provider);
   if (auth.authMethod) parts.push(`(${auth.authMethod})`);
   if (auth.region) parts.push(`[${auth.region}]`);
-  // clientIdHash-style files have scopes but no provider
-  if (!auth.provider && auth.scopes) {
-    parts.push('Kiro IDE session');
-  }
+  if (!auth.provider && auth.scopes) parts.push('Kiro IDE session');
   if (auth.expiresAt) {
     const exp = new Date(auth.expiresAt);
     const now = new Date();
-    if (exp > now) {
-      const hours = Math.round((exp - now) / 3600000);
-      parts.push(`expires in ${hours}h`);
-    } else {
-      parts.push('expired');
-    }
+    parts.push(exp > now ? `expires in ${Math.round((exp - now) / 3600000)}h` : 'expired');
   }
   return parts.join(' ') || 'unknown';
 }
