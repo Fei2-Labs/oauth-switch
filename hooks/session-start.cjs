@@ -5,6 +5,7 @@ const path = require('path');
 
 const cliPath = path.join(__dirname, '..', 'bin', 'oauth-switch.cjs');
 spawnSync('node', [cliPath, '--touch-current'], { stdio: 'ignore' });
+spawnSync('node', [cliPath, 'auto'], { stdio: 'inherit' });
 
 console.log('OAuth Switch is available.');
 console.log('Use !oauth-switch or !oas to list/switch accounts.');

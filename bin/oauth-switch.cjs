@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const path = require('path');
+const { runCodex } = require('./lib/providers/codex.cjs');
 const storeIo = require('./lib/store/io.cjs');
 const storeAccounts = require('./lib/store/accounts.cjs');
 const usageCache = require('./lib/usage/cache.cjs');
@@ -14,6 +15,7 @@ const usageAction = require('./lib/actions/usage.cjs');
 const removeAction = require('./lib/actions/remove.cjs');
 const listAction = require('./lib/actions/list.cjs');
 const switchAction = require('./lib/actions/switch.cjs');
+const autoSwitchAction = require('./lib/actions/auto-switch.cjs');
 
 const {
   getDefaultConfigPath,
@@ -161,7 +163,21 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+
+  const codexIdx = rawArgs.indexOf('codex');
+  if (codexIdx >= 0) {
+    runCodex(rawArgs.slice(codexIdx + 1));
+    return;
+  }
+
+  const autoIdx = rawArgs.indexOf('auto');
+  if (autoIdx >= 0) {
+    await runAutoSwitch();
+    return;
+  }
+
+  const options = parseArgs(rawArgs);
 
   try {
     const config = readJson(options.configPath);
@@ -279,6 +295,80 @@ async function main() {
   } catch (error) {
     console.log(`Switch failed: ${error.message}`);
     process.exitCode = 1;
+  }
+}
+
+async function runAutoSwitch() {
+  const os = require('os');
+  const fs = require('fs');
+
+  try {
+    const config = readJson(getDefaultConfigPath());
+    const credentials = readCredentials(getDefaultCredentialsPath());
+    const options = {
+      configPath: getDefaultConfigPath(),
+      credentialsPath: getDefaultCredentialsPath(),
+      storePath: getDefaultStorePath(),
+      backupDir: getDefaultBackupDir(),
+    };
+    const existingStore = normalizeStore(
+      readJsonIfExists(options.storePath, { version: STORE_VERSION, accounts: [] }),
+      STORE_VERSION
+    );
+    const synced = syncStoreFromLive(existingStore, config, credentials, deepCopy, STORE_VERSION);
+    const store = synced.store;
+    if (synced.changed) writeStore(store, options);
+
+    await autoSwitchAction.runAutoSwitchClaude({
+      store,
+      config,
+      credentials,
+      options,
+      writeStore,
+      writeLiveState,
+      deepCopy,
+      getAccountKey,
+      refreshStoredUsageSnapshots: refreshStoredUsageSnapshotsUi,
+      fetchUsage: fetchUsageApi,
+      setRateLimitResetAt,
+      setRateLimitResetAtFromIso,
+      ensureDir,
+    });
+  } catch (err) {
+    console.log(`[auto] Claude check failed: ${err.message}`);
+  }
+
+  try {
+    const codexAuthPath = path.join(os.homedir(), '.codex', 'auth.json');
+    const codexStorePath = path.join(os.homedir(), '.CodexMultiAccounts.json');
+    const codexBackupDir = path.join(os.homedir(), '.codex', 'backups', 'multi-account-switch');
+
+    if (fs.existsSync(codexAuthPath)) {
+      const readJsonLocal = (p) => {
+        if (!fs.existsSync(p)) return null;
+        return JSON.parse(fs.readFileSync(p, 'utf8'));
+      };
+      const writeJsonLocal = (p, v) => {
+        ensureDir(path.dirname(p));
+        fs.writeFileSync(p, `${JSON.stringify(v, null, 2)}\n`, 'utf8');
+      };
+      const backupFileLocal = (filePath) => {
+        if (!fs.existsSync(filePath)) return;
+        ensureDir(codexBackupDir);
+        const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+        fs.copyFileSync(filePath, path.join(codexBackupDir, `auth.json.${ts}.bak`));
+      };
+
+      await autoSwitchAction.runAutoSwitchCodex({
+        readJson: readJsonLocal,
+        writeJson: writeJsonLocal,
+        backupFile: backupFileLocal,
+        AUTH_PATH: codexAuthPath,
+        STORE_PATH: codexStorePath,
+      });
+    }
+  } catch (err) {
+    console.log(`[auto] Codex check failed: ${err.message}`);
   }
 }
 
