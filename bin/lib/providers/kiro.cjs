@@ -272,7 +272,9 @@ async function refreshAndSwitch(target, store, idx) {
   // Update store with refreshed tokens
   target.auth.accessToken = newAccessToken;
   target.auth.refreshToken = newRefreshToken;
+  target.auth.expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
   target.lastUsedAt = new Date().toISOString();
+  target.displayName = getDisplayName(target.auth);
   store.activeKey = target.key;
   writeStore(store);
 
