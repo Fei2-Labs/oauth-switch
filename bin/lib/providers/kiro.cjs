@@ -216,7 +216,17 @@ function resolveAccountIndex(accounts, selector) {
 
 async function refreshAndSwitch(target, store, idx) {
   const auth = target.auth;
-  const isSocial = auth.authMethod === 'social' || auth.provider === 'Google' || auth.provider === 'Github';
+  const provider = (auth.provider || '').toLowerCase();
+  const isSocial = auth.authMethod === 'social' || provider === 'google' || provider === 'github';
+
+  // Canonical provider values Kiro IDE expects
+  const canonicalProvider = isSocial
+    ? (provider === 'github' ? 'Github' : 'Google')
+    : (auth.provider || 'BuilderId');
+
+  const SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK';
+  const BUILDER_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX';
+  const resolvedProfileArn = auth.profileArn || (isSocial ? SOCIAL_PROFILE_ARN : BUILDER_PROFILE_ARN);
 
   let newAccessToken = auth.accessToken;
   let newRefreshToken = auth.refreshToken;
@@ -257,19 +267,19 @@ async function refreshAndSwitch(target, store, idx) {
   const tokenData = isSocial ? {
     accessToken: newAccessToken,
     refreshToken: newRefreshToken,
-    profileArn: auth.profileArn,
+    profileArn: resolvedProfileArn,
     expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
     authMethod: 'social',
-    provider: auth.provider,
+    provider: canonicalProvider,
   } : {
     accessToken: newAccessToken,
     refreshToken: newRefreshToken,
     expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
     clientIdHash: auth.clientIdHash,
     authMethod: auth.authMethod || 'IdC',
-    provider: auth.provider || 'BuilderId',
+    provider: canonicalProvider,
     region: auth.region || 'us-east-1',
-    profileArn: auth.profileArn,
+    profileArn: resolvedProfileArn,
   };
 
   writeJson(AUTH_PATH, tokenData);
