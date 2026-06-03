@@ -64,11 +64,10 @@ function formatAccountSummary(accounts, deps) {
     const marker = entry.current ? '*' : ' ';
     const metadata = entry.metadata || {};
     const displayName = truncate(getPreferredDisplayName(metadata), 18);
-    const alias = entry.alias ? ` (${entry.alias})` : '';
     const plan = getCompactPlanLabel(entry);
     const lastUsed = formatRelativeTime(entry.lastUsedAt);
     const usageColumns = getUsageColumns(entry);
-    return `${marker} [${entry.index}] ${displayName}${alias} | ${plan} | ${usageColumns} | used:${lastUsed}`;
+    return `${marker} [${entry.index}] ${displayName} | ${plan} | ${usageColumns} | used:${lastUsed}`;
   });
 }
 

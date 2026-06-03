@@ -5,7 +5,7 @@
 <h1 align="center">OAuth Switch</h1>
 
 <p align="center">
-  <strong>Multi-account switcher for Claude Code & Codex CLI</strong><br/>
+  <strong>Multi-account switcher for Claude Code, Codex CLI, Kiro, and Windsurf</strong><br/>
   Auto-switch when you hit rate limits. Never waste time waiting again.
 </p>
 
@@ -19,7 +19,7 @@
 
 ## What it does
 
-Pool multiple OAuth accounts for **Claude Code** and **OpenAI Codex**, switch between them instantly, and let the tool auto-rotate when usage limits approach.
+Pool multiple OAuth accounts for **Claude Code** and **OpenAI Codex**, switch between them instantly, and let the tool auto-rotate when usage limits approach. It also shows local read-only quota snapshots for Kiro and Windsurf.
 
 | Feature | Description |
 |---------|-------------|
@@ -28,7 +28,7 @@ Pool multiple OAuth accounts for **Claude Code** and **OpenAI Codex**, switch be
 | ⚡ **Auto-switch** | Background daemon rotates to the best account before you hit limits |
 | 🖥️ **Menu bar app** | Native macOS app — see status, switch accounts, adjust thresholds |
 | 🔔 **Notifications** | macOS alerts when a switch happens |
-| 🔑 **Multi-provider** | Claude Code, Codex, and Kiro IDE — all in one tool |
+| 🔑 **Multi-provider** | Claude Code, Codex, Kiro IDE, and Windsurf — all in one tool |
 | 🏢 **Enterprise SSO** | Supports Builder ID, Google/GitHub social, and IAM Identity Center |
 
 ---
@@ -50,6 +50,9 @@ oas kiro
 
 # List Codex accounts
 oas codex
+
+# Show Windsurf quota
+oas windsurf
 ```
 
 ---
@@ -86,6 +89,9 @@ oas codex personal
 
 # Set alias for Codex account
 oas codex alias 0 personal
+
+# Show Windsurf quota from the local Windsurf state database
+oas windsurf
 
 # Run auto-switch check manually
 oas auto
@@ -139,10 +145,11 @@ open /Applications/OAuthSwitch.app
 ```
 
 Features:
-- Live usage display for all accounts (Claude + Codex)
+- Live usage display for Claude/Codex/Windsurf, with menu bar balance display for the selected provider
+- Monochrome provider icons in the menu bar and provider panels
 - One-click account switching
-- Manual "Check Now" trigger
-- Threshold configuration in Settings
+- Manual refresh from the menu bar
+- Menu bar warning threshold and balance source configuration in Settings
 
 ---
 
@@ -166,6 +173,8 @@ Features:
 ```
 
 `oauth-switch` snapshots each account's credentials when you use it. Switching replaces the live config files with the stored snapshot and refreshes the token. Restart the CLI/IDE for changes to take effect.
+
+Claude accounts that share the same OAuth access/refresh token pair are collapsed into a single quota entry in the CLI and menu bar app, even if their metadata or `accountUuid` differs.
 
 ### Kiro account types
 

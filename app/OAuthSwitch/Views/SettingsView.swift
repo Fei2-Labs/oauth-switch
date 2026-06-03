@@ -5,41 +5,83 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Auto-Switch") {
-                Toggle("Enable auto-switch", isOn: $appState.autoSwitchEnabled)
-
-                HStack {
-                    Text("5h trigger threshold")
-                    Spacer()
-                    TextField("", value: $appState.trigger5h, format: .number)
-                        .frame(width: 50)
-                    Text("%")
+            Section("Refresh") {
+                Picker("Background refresh", selection: $appState.refreshIntervalSeconds) {
+                    Text("60 seconds").tag(60)
+                    Text("120 seconds").tag(120)
+                    Text("300 seconds").tag(300)
                 }
 
-                HStack {
-                    Text("7d trigger threshold")
-                    Spacer()
-                    TextField("", value: $appState.trigger7d, format: .number)
-                        .frame(width: 50)
-                    Text("%")
+                LabeledContent("Current interval") {
+                    Text(appState.refreshIntervalLabel)
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Section("Info") {
+            Section("Automation") {
+                Toggle("Sync Codex usage on refresh", isOn: $appState.autoSyncCodexUsage)
+                Toggle("Sync Kiro accounts from local SSO cache", isOn: $appState.autoSyncKiroAccounts)
+                Toggle("Auto-refresh expired Kiro accounts", isOn: $appState.autoRefreshExpiredKiro)
+            }
+
+            Section("Display") {
+                Toggle("Show reset times", isOn: $appState.showResetTimes)
+                Toggle("Show inactive accounts", isOn: $appState.showInactiveAccounts)
+                Picker("Menu bar balance", selection: $appState.menuBarBalanceSourceRawValue) {
+                    ForEach(MenuBarBalanceSource.allCases) { source in
+                        Text(source.title).tag(source.rawValue)
+                    }
+                }
+            }
+
+            Section("Claude Warning Thresholds") {
+                HStack {
+                    Text("5h warning threshold")
+                    Spacer()
+                    TextField("", value: $appState.trigger5h, format: .number)
+                        .frame(width: 56)
+                        .multilineTextAlignment(.trailing)
+                    Text("%")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("7d warning threshold")
+                    Spacer()
+                    TextField("", value: $appState.trigger7d, format: .number)
+                        .frame(width: 56)
+                        .multilineTextAlignment(.trailing)
+                    Text("%")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Diagnostics") {
                 LabeledContent("Claude accounts") {
                     Text("\(appState.claudeAccounts.count)")
                 }
                 LabeledContent("Codex accounts") {
                     Text("\(appState.codexAccounts.count)")
                 }
+                LabeledContent("Kiro accounts") {
+                    Text("\(appState.kiroAccounts.count)")
+                }
+                LabeledContent("Windsurf profiles") {
+                    Text("\(appState.windsurfAccounts.count)")
+                }
+                LabeledContent("Windsurf plan") {
+                    Text(appState.windsurfAccounts.first?.planLabel ?? "Unknown")
+                        .lineLimit(1)
+                }
                 LabeledContent("CLI path") {
                     Text("~/Dropbox/My Apps/oauth-switch/bin/oauth-switch.cjs")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 400, height: 250)
+        .frame(width: 460, height: 470)
     }
 }

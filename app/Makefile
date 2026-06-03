@@ -15,6 +15,9 @@ install: build
 	cp $(BUILD_DIR)/$(APP_NAME) $(INSTALL_DIR)/$(BUNDLE)/Contents/MacOS/
 	cp Info.plist $(INSTALL_DIR)/$(BUNDLE)/Contents/
 	cp OAuthSwitch/Resources/AppIcon.icns $(INSTALL_DIR)/$(BUNDLE)/Contents/Resources/
+	cp -R $(BUILD_DIR)/$(APP_NAME)_$(APP_NAME).bundle $(INSTALL_DIR)/$(BUNDLE)/Contents/Resources/
+	xattr -cr $(INSTALL_DIR)/$(BUNDLE)
+	codesign --force --deep --sign - $(INSTALL_DIR)/$(BUNDLE)
 	@echo "Installed to $(INSTALL_DIR)/$(BUNDLE)"
 
 run: build

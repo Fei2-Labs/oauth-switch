@@ -1,8 +1,7 @@
 function getListGuidance(usageCommand) {
   return [
-    `Switch: ${usageCommand} <index|alias|email>`,
-    `Alias:  ${usageCommand} alias <index> <name>`,
-    `Remove: ${usageCommand} --remove <index>`,
+    `Run ${usageCommand} <index> to make one of these stored entries the active Claude account.`,
+    `Run ${usageCommand} --remove <index> to remove a stored account.`,
   ];
 }
 

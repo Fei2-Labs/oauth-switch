@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { fetchCodexUsage } = require('../actions/auto-switch.cjs');
 
 const AUTH_PATH = path.join(os.homedir(), '.codex', 'auth.json');
 const STORE_PATH = path.join(os.homedir(), '.CodexMultiAccounts.json');
@@ -107,6 +108,7 @@ function syncCurrentAuth() {
 
   if (idx >= 0) {
     entry.lastUsedAt = store.accounts[idx].lastUsedAt || now;
+    entry.usageSnapshot = store.accounts[idx].usageSnapshot;
     store.accounts[idx] = entry;
   } else {
     store.accounts.push(entry);
@@ -114,6 +116,45 @@ function syncCurrentAuth() {
 
   writeStore(store);
   return { store, currentKey: key };
+}
+
+async function syncUsage() {
+  const auth = readJson(AUTH_PATH);
+  if (!auth?.tokens?.access_token) {
+    console.log('No Codex OAuth session found.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const { store, currentKey } = syncCurrentAuth();
+  const idx = store.accounts.findIndex((account) => account.key === currentKey);
+  if (idx < 0) {
+    console.log('Current Codex account is not stored.');
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    const usage = await fetchCodexUsage(auth.tokens.access_token);
+    const snapshot = {
+      five_hour: typeof usage.five_hour_percent === 'number' || usage.five_hour_reset ? {
+        utilization: usage.five_hour_percent,
+        resets_at: usage.five_hour_reset ?? null,
+      } : null,
+      seven_day: typeof usage.weekly_percent === 'number' || usage.weekly_reset ? {
+        utilization: usage.weekly_percent,
+        resets_at: usage.weekly_reset ?? null,
+      } : null,
+      fetchedAt: new Date().toISOString(),
+    };
+
+    store.accounts[idx].usageSnapshot = snapshot;
+    writeStore(store);
+    console.log('Synced Codex usage.');
+  } catch (error) {
+    console.log(`Failed to sync Codex usage: ${error.message}`);
+    process.exitCode = 1;
+  }
 }
 
 function listAccounts() {
@@ -192,11 +233,16 @@ function removeAccount(index) {
   console.log(`Removed [${idx}] ${removed.displayName}.`);
 }
 
-function runCodex(args) {
+async function runCodex(args) {
   const subcommand = args[0];
 
   if (!subcommand) {
     listAccounts();
+    return;
+  }
+
+  if (subcommand === 'sync-usage') {
+    await syncUsage();
     return;
   }
 

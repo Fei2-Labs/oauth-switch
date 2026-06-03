@@ -8,6 +8,8 @@ const THRESHOLDS = {
   target7d: 80,
 };
 
+const { getDisplayAccounts } = require('../store/accounts.cjs');
+
 function notify(title, message) {
   const escaped = message.replace(/"/g, '\\"');
   const titleEsc = title.replace(/"/g, '\\"');
@@ -78,6 +80,7 @@ async function runAutoSwitchClaude(context) {
   } = context;
 
   const currentKey = getAccountKey(config.oauthAccount);
+  const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
   const accessToken = credentials?.claudeAiOauth?.accessToken;
 
   if (!accessToken) {
@@ -108,7 +111,7 @@ async function runAutoSwitchClaude(context) {
   }
 
   const isRateLimited = currentUsage?.rate_limited === true;
-  const { target, forced } = pickBestTarget(store.accounts, currentKey);
+  const { target, forced } = pickBestTarget(accounts, currentKey);
 
   if (!target) {
     notify('OAuth Switch', 'All Claude accounts at capacity. No switch possible.');
@@ -229,10 +232,14 @@ function fetchCodexUsage(accessToken) {
         }
         try {
           const parsed = JSON.parse(data);
+          const primaryWindow = parsed.rate_limit?.primary_window;
+          const secondaryWindow = parsed.rate_limit?.secondary_window;
           resolve({
-            five_hour_percent: parsed.five_hour_percent ?? parsed.five_hour?.utilization,
-            weekly_percent: parsed.weekly_percent ?? parsed.seven_day?.utilization ?? parsed.weekly?.utilization,
-            weekly_reset: parsed.weekly_reset ?? parsed.seven_day?.resets_at,
+            rate_limited: parsed.rate_limited === true || parsed.rate_limit?.limit_reached === true,
+            five_hour_percent: parsed.five_hour_percent ?? parsed.five_hour?.utilization ?? primaryWindow?.used_percent,
+            five_hour_reset: parsed.five_hour_reset ?? parsed.five_hour?.resets_at ?? (typeof primaryWindow?.reset_at === 'number' ? new Date(primaryWindow.reset_at * 1000).toISOString() : null),
+            weekly_percent: parsed.weekly_percent ?? parsed.seven_day?.utilization ?? parsed.weekly?.utilization ?? secondaryWindow?.used_percent,
+            weekly_reset: parsed.weekly_reset ?? parsed.seven_day?.resets_at ?? (typeof secondaryWindow?.reset_at === 'number' ? new Date(secondaryWindow.reset_at * 1000).toISOString() : null),
             raw: parsed,
           });
         } catch {

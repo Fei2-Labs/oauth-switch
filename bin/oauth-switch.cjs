@@ -3,6 +3,7 @@
 const path = require('path');
 const { runCodex } = require('./lib/providers/codex.cjs');
 const { runKiro } = require('./lib/providers/kiro.cjs');
+const { runWindsurf } = require('./lib/providers/windsurf.cjs');
 const storeIo = require('./lib/store/io.cjs');
 const storeAccounts = require('./lib/store/accounts.cjs');
 const usageCache = require('./lib/usage/cache.cjs');
@@ -178,6 +179,12 @@ async function main() {
     return;
   }
 
+  const windsurfIdx = rawArgs.indexOf('windsurf');
+  if (windsurfIdx >= 0) {
+    runWindsurf(rawArgs.slice(windsurfIdx + 1));
+    return;
+  }
+
   const autoIdx = rawArgs.indexOf('auto');
   if (autoIdx >= 0) {
     await runAutoSwitch();
@@ -253,7 +260,7 @@ async function main() {
 
     const synced = syncStoreFromLive(existingStore, config, credentials, deepCopy, STORE_VERSION);
     const store = synced.store;
-    const accounts = getDisplayAccounts(store, config.oauthAccount);
+    const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
 
     if (!options.selector) {
       await runListAction({

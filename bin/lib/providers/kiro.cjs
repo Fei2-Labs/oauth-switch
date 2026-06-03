@@ -66,11 +66,6 @@ function getDisplayName(auth) {
   if (auth.authMethod) parts.push(`(${auth.authMethod})`);
   if (auth.region) parts.push(`[${auth.region}]`);
   if (!auth.provider && auth.scopes) parts.push('Kiro IDE session');
-  if (auth.expiresAt) {
-    const exp = new Date(auth.expiresAt);
-    const now = new Date();
-    parts.push(exp > now ? `expires in ${Math.round((exp - now) / 3600000)}h` : 'expired');
-  }
   return parts.join(' ') || 'unknown';
 }
 
@@ -177,13 +172,21 @@ function listAccounts() {
   console.log('--- Kiro Accounts ---');
   store.accounts.forEach((account, index) => {
     const marker = account.key === currentKey ? ' ← active' : '';
-    const expired = account.auth?.expiresAt && new Date(account.auth.expiresAt) < new Date() ? ' [token expired — re-login needed]' : '';
-    console.log(`  [${index}] ${account.displayName}${expired}${marker}`);
+    // refreshToken validity matters, not the short-lived accessToken expiry.
+    // Only flag accounts we know have no refreshToken at all.
+    const noRefresh = !account.auth?.refreshToken ? ' [no refresh token — re-login needed]' : '';
+    console.log(`  [${index}] ${account.displayName}${noRefresh}${marker}`);
   });
   console.log('');
   console.log('Switch: oas kiro <index|name>');
   console.log('Alias:  oas kiro alias <index> <name>');
   console.log('Remove: oas kiro remove <index>');
+}
+
+function isExpiredAuth(auth) {
+  if (!auth?.expiresAt) return false;
+  const expiresAt = new Date(auth.expiresAt);
+  return !Number.isNaN(expiresAt.valueOf()) && expiresAt < new Date();
 }
 
 async function switchAccount(index) {
@@ -230,18 +233,43 @@ function resolveAccountIndex(accounts, selector) {
 }
 
 async function refreshAndSwitch(target, store, idx) {
-  const auth = target.auth;
+  const refreshed = await refreshStoredAuth(target.auth);
+  if (!refreshed.success) {
+    if (refreshed.requiresRelogin) {
+      console.log(`Token expired or access denied for [${idx}] ${target.displayName}.`);
+      console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
+    } else {
+      console.log(`Warning: token refresh failed (${refreshed.error}), using existing token.`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  backupFile(AUTH_PATH);
+  writeJson(AUTH_PATH, refreshed.auth);
+
+  // Update store with refreshed tokens
+  target.auth = refreshed.auth;
+  target.lastUsedAt = new Date().toISOString();
+  // Only update displayName if it hasn't been manually aliased
+  if (!target._aliased) {
+    target.displayName = getDisplayName(target.auth);
+  }
+  store.activeKey = target.key;
+  writeStore(store);
+
+  console.log(`Switched Kiro to [${idx}] ${target.displayName}.`);
+}
+
+async function refreshStoredAuth(auth) {
   const provider = (auth.provider || '').toLowerCase();
   const isSocial = auth.authMethod === 'social' || provider === 'google' || provider === 'github';
-
-  // Canonical provider values Kiro IDE expects
   const canonicalProvider = isSocial
     ? (provider === 'github' ? 'Github' : 'Google')
     : (auth.provider || 'BuilderId');
 
   const SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK';
   const BUILDER_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX';
-  // Use stored profileArn if it's a real value (not the placeholder)
   const storedArn = auth.profileArn && auth.profileArn !== BUILDER_PROFILE_ARN ? auth.profileArn : null;
   const resolvedProfileArn = storedArn || (isSocial ? SOCIAL_PROFILE_ARN : null);
 
@@ -254,40 +282,27 @@ async function refreshAndSwitch(target, store, idx) {
       newAccessToken = result.accessToken;
       newRefreshToken = result.refreshToken || auth.refreshToken;
     } else if (result.error && /invalid_grant|access_denied|unauthorized|expired/i.test(result.error)) {
-      console.log(`Token expired or access denied for [${idx}] ${target.displayName}.`);
-      console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
-      process.exitCode = 1;
-      return;
+      return { success: false, requiresRelogin: true, error: result.error };
     } else {
-      console.log(`Warning: token refresh failed (${result.error}), using existing token.`);
+      return { success: false, requiresRelogin: false, error: result.error };
     }
   } else {
     const clientData = findClientRegistration(auth.clientIdHash);
-    if (clientData) {
-      const result = await refreshOidcToken(auth.refreshToken, clientData.clientId, clientData.clientSecret, auth.region || 'us-east-1');
-      if (result.success) {
-        newAccessToken = result.accessToken;
-        newRefreshToken = result.refreshToken || auth.refreshToken;
-      } else if (result.error && /invalid_grant|access_denied|unauthorized|expired/i.test(result.error)) {
-        console.log(`Token expired or access denied for [${idx}] ${target.displayName}.`);
-        console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
-        process.exitCode = 1;
-        return;
-      } else {
-        console.log(`Warning: token refresh failed (${result.error}), using existing token.`);
-      }
+    if (!clientData) {
+      return { success: false, requiresRelogin: true, error: 'No client registration found' };
+    }
+    const result = await refreshOidcToken(auth.refreshToken, clientData.clientId, clientData.clientSecret, auth.region || 'us-east-1');
+    if (result.success) {
+      newAccessToken = result.accessToken;
+      newRefreshToken = result.refreshToken || auth.refreshToken;
+    } else if (result.error && /invalid_grant|access_denied|unauthorized|expired/i.test(result.error)) {
+      return { success: false, requiresRelogin: true, error: result.error };
     } else {
-      console.log(`No client registration found for [${idx}] ${target.displayName}.`);
-      console.log('Enterprise account may require re-authentication.');
-      console.log('Please log in again in Kiro IDE, then run `oas kiro` to re-capture.');
-      process.exitCode = 1;
-      return;
+      return { success: false, requiresRelogin: false, error: result.error };
     }
   }
 
-  backupFile(AUTH_PATH);
-
-  const tokenData = isSocial ? {
+  const refreshedAuth = isSocial ? {
     accessToken: newAccessToken,
     refreshToken: newRefreshToken,
     ...(resolvedProfileArn && { profileArn: resolvedProfileArn }),
@@ -305,21 +320,39 @@ async function refreshAndSwitch(target, store, idx) {
     ...(resolvedProfileArn && { profileArn: resolvedProfileArn }),
   };
 
-  writeJson(AUTH_PATH, tokenData);
+  return { success: true, auth: refreshedAuth };
+}
 
-  // Update store with refreshed tokens
-  target.auth.accessToken = newAccessToken;
-  target.auth.refreshToken = newRefreshToken;
-  target.auth.expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
-  target.lastUsedAt = new Date().toISOString();
-  // Only update displayName if it hasn't been manually aliased
-  if (!target._aliased) {
-    target.displayName = getDisplayName(target.auth);
+async function refreshExpiredAccounts() {
+  const { store } = syncCurrentAuth();
+  let refreshedCount = 0;
+  let reloginCount = 0;
+  let failedCount = 0;
+
+  for (const account of store.accounts) {
+    if (!isExpiredAuth(account.auth) || !account.auth?.refreshToken) {
+      continue;
+    }
+
+    const refreshed = await refreshStoredAuth(account.auth);
+    if (refreshed.success) {
+      account.auth = refreshed.auth;
+      if (!account._aliased) {
+        account.displayName = getDisplayName(account.auth);
+      }
+      refreshedCount += 1;
+      continue;
+    }
+
+    if (refreshed.requiresRelogin) {
+      reloginCount += 1;
+    } else {
+      failedCount += 1;
+    }
   }
-  store.activeKey = target.key;
-  writeStore(store);
 
-  console.log(`Switched Kiro to [${idx}] ${target.displayName}.`);
+  writeStore(store);
+  console.log(`Refreshed Kiro accounts: ${refreshedCount} updated, ${reloginCount} need re-login, ${failedCount} failed.`);
 }
 
 function findClientRegistration(clientIdHash) {
@@ -422,6 +455,17 @@ async function runKiro(args) {
 
   if (!subcommand) {
     listAccounts();
+    return;
+  }
+
+  if (subcommand === 'sync') {
+    syncCurrentAuth();
+    console.log('Synced Kiro accounts.');
+    return;
+  }
+
+  if (subcommand === 'refresh-expired') {
+    await refreshExpiredAccounts();
     return;
   }
 

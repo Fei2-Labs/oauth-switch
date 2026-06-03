@@ -70,25 +70,13 @@ function findSelection(accounts, selector) {
     throw new Error('Selector cannot be empty.');
   }
 
-  // Numeric index
   const numeric = Number.parseInt(trimmed, 10);
   if (!Number.isNaN(numeric) && String(numeric) === trimmed) {
     const byIndex = accounts.find((entry) => Number(entry.index) === numeric);
     if (byIndex) return byIndex;
   }
 
-  // Alias / label match (case-insensitive)
-  const lower = trimmed.toLowerCase();
-  const byAlias = accounts.find((entry) => entry.alias && entry.alias.toLowerCase() === lower);
-  if (byAlias) return byAlias;
-
-  // Email partial match
-  const byEmail = accounts.find((entry) =>
-    entry.metadata?.emailAddress?.toLowerCase().includes(lower)
-  );
-  if (byEmail) return byEmail;
-
-  throw new Error(`No account matched '${trimmed}'. Use a numeric index, alias, or partial email.`);
+  throw new Error(`No account matched index '${trimmed}'. Use a numeric index.`);
 }
 
 function removeStoredAccount(store, removeIndex) {
