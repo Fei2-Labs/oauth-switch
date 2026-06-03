@@ -40,6 +40,28 @@ function readCredentials(filePath) {
   return readJson(filePath);
 }
 
+function writeCredentials(filePath, value) {
+  // Always write the file (fallback store).
+  writeJson(filePath, value);
+  // Mirror into the macOS Keychain, which Claude Code reads first. Without this,
+  // a switch updates the file but leaves the keychain on the previous account,
+  // so Claude keeps using the old account while the display shows the new one.
+  try {
+    const { execFileSync } = require('child_process');
+    const account = process.env.USER || os.userInfo().username;
+    execFileSync('security', [
+      'add-generic-password',
+      '-U',
+      '-a', account,
+      '-s', 'Claude Code-credentials',
+      '-w', JSON.stringify(value),
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (_) {
+    // Keychain unavailable (non-macOS, locked, or no entry). File write already
+    // succeeded; readCredentials falls back to it.
+  }
+}
+
 function readJsonIfExists(filePath, fallback) {
   if (!fs.existsSync(filePath)) return fallback;
   return readJson(filePath);
@@ -75,7 +97,7 @@ function writeLiveState(config, credentials, options) {
   backupFile(options.configPath, options.backupDir);
   backupFile(options.credentialsPath, options.backupDir);
   writeJson(options.configPath, config);
-  writeJson(options.credentialsPath, credentials);
+  writeCredentials(options.credentialsPath, credentials);
 }
 
 function writeStore(store, options) {
@@ -93,6 +115,7 @@ module.exports = {
   readCredentials,
   readJsonIfExists,
   writeJson,
+  writeCredentials,
   backupFile,
   deepCopy,
   writeLiveState,
