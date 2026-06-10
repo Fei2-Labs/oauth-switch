@@ -245,10 +245,40 @@ class AppState: ObservableObject {
             guard let self else { return }
             let result = self.switchService.run(args: args)
             DispatchQueue.main.async {
-                self.lastSwitchMessage = result
+                self.lastSwitchMessage = Self.condensedSwitchMessage(from: result)
                 self.loadAll()
             }
         }
+    }
+
+    /// Reduces raw CLI output (which may include the full "Stored account list:"
+    /// dump and restart hints) to a concise footer status of at most two lines.
+    /// Errors are preserved: SwitchService merges stderr into the same output and
+    /// returns single-line "Error: ..." strings on launch failure, both of which
+    /// are matched by the keyword scan or the first-non-empty-line fallback.
+    private static func condensedSwitchMessage(from raw: String) -> String {
+        // Drop the multi-line account dump and everything after it.
+        var actionText = raw
+        if let dumpRange = raw.range(of: "Stored account list:") {
+            actionText = String(raw[..<dumpRange.lowerBound])
+        }
+
+        let lines = actionText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        let keywords = ["Switched", "Disabled", "Enabled", "Usage API throttled", "Error"]
+        let summary = lines.first { line in keywords.contains { line.contains($0) } }
+            ?? lines.first
+            ?? ""
+
+        guard raw.contains("Restart Claude Code"), !summary.contains("Restart Claude Code") else {
+            return summary
+        }
+        return summary.isEmpty
+            ? "Restart Claude Code to apply."
+            : summary + "\nRestart Claude Code to apply."
     }
 
     private func buildClaudeSection() -> ProviderSectionSnapshot {
