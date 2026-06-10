@@ -9,6 +9,16 @@ const THRESHOLDS = {
 };
 
 const { getDisplayAccounts } = require('../store/accounts.cjs');
+const { logEvent, formatLine } = require('../log.cjs');
+
+// Timestamped console line for the launchd stdout log (/tmp/oauth-switch-auto.log).
+// persist=true additionally appends the line to the persistent history file
+// (~/.oauth-switch/switch.log): every actual switch and every "no viable
+// target / staying put / all at capacity" decision is persisted; routine
+// "within limits" and transient-failure lines stay console-only.
+function autoLog(message, { persist = false } = {}) {
+  console.log(persist ? logEvent('auto', message) : formatLine('auto', message));
+}
 
 function notify(title, message) {
   const escaped = message.replace(/"/g, '\\"');
@@ -186,7 +196,7 @@ async function runAutoSwitchClaude(context) {
   const accessToken = credentials?.claudeAiOauth?.accessToken;
 
   if (!accessToken) {
-    console.log('[auto] No access token for current Claude account.');
+    autoLog('No access token for current Claude account.');
     return { switched: false };
   }
 
@@ -203,12 +213,12 @@ async function runAutoSwitchClaude(context) {
     if (changed) writeStore(store, options);
     currentUsage = usage;
   } catch (err) {
-    console.log(`[auto] Failed to fetch usage: ${err.message}`);
+    autoLog(`Failed to fetch usage: ${err.message}`);
     return { switched: false };
   }
 
   if (!shouldTrigger(currentUsage)) {
-    console.log('[auto] Claude Code usage within limits. No switch needed.');
+    autoLog('Claude Code usage within limits. No switch needed.');
     return { switched: false };
   }
 
@@ -221,13 +231,13 @@ async function runAutoSwitchClaude(context) {
 
   if (!target) {
     sendNotification('OAuth Switch', 'All Claude accounts at capacity. No switch possible.');
-    console.log('[auto] All accounts at capacity.');
+    autoLog('All Claude accounts at capacity. No switch possible.', { persist: true });
     return { switched: false };
   }
 
   if (forced && !isRateLimited) {
     sendNotification('OAuth Switch', 'Claude usage high, but no viable target. Staying put.');
-    console.log('[auto] No viable target. Only notifying.');
+    autoLog('Claude usage high, but no viable target. Staying put.', { persist: true });
     return { switched: false };
   }
 
@@ -245,7 +255,7 @@ async function runAutoSwitchClaude(context) {
   const name = target.metadata?.emailAddress || target.key;
   const reason = isRateLimited ? 'rate limited (429)' : 'usage threshold exceeded';
   sendNotification('OAuth Switch', `Claude switched to ${name} (${reason}). Restart to apply.`);
-  console.log(`[auto] Switched Claude to ${name} (${reason}).`);
+  autoLog(`Switched Claude to ${name} (${reason}).`, { persist: true });
   return { switched: true };
 }
 
@@ -255,13 +265,13 @@ async function runAutoSwitchCodex(context) {
 
   const auth = readJson(AUTH_PATH);
   if (!auth || !auth.tokens?.access_token) {
-    console.log('[auto] No Codex OAuth session found.');
+    autoLog('No Codex OAuth session found.');
     return { switched: false };
   }
 
   const store = readJson(STORE_PATH) || { version: '1.0.0', accounts: [] };
   if (store.accounts.length < 2) {
-    console.log('[auto] Only one Codex account stored. Nothing to switch to.');
+    autoLog('Only one Codex account stored. Nothing to switch to.');
     return { switched: false };
   }
 
@@ -269,12 +279,12 @@ async function runAutoSwitchCodex(context) {
   try {
     currentUsage = await fetchCodexUsage(auth.tokens.access_token);
   } catch (err) {
-    console.log(`[auto] Failed to fetch Codex usage: ${err.message}`);
+    autoLog(`Failed to fetch Codex usage: ${err.message}`);
     return { switched: false };
   }
 
   if (!shouldTriggerCodex(currentUsage)) {
-    console.log('[auto] Codex usage within limits. No switch needed.');
+    autoLog('Codex usage within limits. No switch needed.');
     return { switched: false };
   }
 
@@ -294,13 +304,13 @@ async function runAutoSwitchCodex(context) {
 
   if (!target) {
     notify('OAuth Switch', 'All Codex accounts at capacity.');
-    console.log('[auto] No Codex targets available.');
+    autoLog('All Codex accounts at capacity. No switch possible.', { persist: true });
     return { switched: false };
   }
 
   if (forced && !isRateLimited) {
     notify('OAuth Switch', 'Codex usage high, but no viable target. Staying put.');
-    console.log('[auto] No viable Codex target. Only notifying.');
+    autoLog('Codex usage high, but no viable target. Staying put.', { persist: true });
     return { switched: false };
   }
 
@@ -313,7 +323,7 @@ async function runAutoSwitchCodex(context) {
   writeJson(AUTH_PATH, target.auth);
 
   notify('OAuth Switch', `Codex switched to ${target.displayName}. Restart to apply.`);
-  console.log(`[auto] Switched Codex to ${target.displayName}.`);
+  autoLog(`Switched Codex to ${target.displayName}.`, { persist: true });
   return { switched: true };
 }
 

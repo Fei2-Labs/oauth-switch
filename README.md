@@ -107,6 +107,9 @@ oas windsurf
 # Run auto-switch check manually
 oas auto
 
+# Show the last 50 switch history entries (manual + auto)
+oas log
+
 # Sync current account into store
 oas sync
 
@@ -148,9 +151,16 @@ launchctl load ~/Library/LaunchAgents/com.oauth-switch.auto.plist
 # Stop
 launchctl unload ~/Library/LaunchAgents/com.oauth-switch.auto.plist
 
-# View logs
+# View daemon stdout (every line timestamped)
 cat /tmp/oauth-switch-auto.log
+
+# View the persistent switch history (manual + auto)
+oas log
 ```
+
+### Switch history
+
+Every switch is recorded in `~/.oauth-switch/switch.log` as `YYYY-MM-DD HH:mm:ss [source] message`, where the source tag is `[auto]` (daemon-initiated) or `[manual]` (CLI or menu bar app). Besides actual switches, the history records auto-switch "no viable target / staying put / all accounts at capacity" decisions and manual disable/enable actions; routine "usage within limits" checks only go to the daemon stdout log. The file is trimmed to the last ~500 lines once it exceeds ~1 MB. `oas log` prints the last 50 entries.
 
 ---
 

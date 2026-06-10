@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { fetchCodexUsage, toCodexUsageSnapshot } = require('../actions/auto-switch.cjs');
+const { logEvent } = require('../log.cjs');
 const {
   decodeJwtPayload,
   getCodexAccountKey,
@@ -323,6 +324,7 @@ function switchAccount(index) {
   writeStore(store);
   writeJson(AUTH_PATH, target.auth);
 
+  logEvent('manual', `Switched Codex to ${target.displayName}`);
   console.log(`Switched Codex to [${idx}] ${target.displayName}.`);
   console.log('Restart Codex for the change to take effect.');
 }
@@ -380,8 +382,10 @@ function setAccountDisabled(index, disabled) {
   }
   writeStore(store);
   if (disabled) {
+    logEvent('manual', `Disabled Codex account ${store.accounts[idx].displayName}`);
     console.log(`Disabled [${idx}] ${store.accounts[idx].displayName}. Auto-switch will skip this account.`);
   } else {
+    logEvent('manual', `Enabled Codex account ${store.accounts[idx].displayName}`);
     console.log(`Enabled [${idx}] ${store.accounts[idx].displayName}. Auto-switch can pick this account again.`);
   }
 }

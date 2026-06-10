@@ -1,5 +1,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
+
+// Persisted switch-history writes must never touch the real ~/.oauth-switch.
+process.env.OAUTH_SWITCH_LOG_PATH = path.join(
+  os.tmpdir(),
+  `oauth-switch-test-${process.pid}-switch.log`
+);
 
 const {
   pickBestTarget,

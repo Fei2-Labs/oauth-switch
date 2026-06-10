@@ -1,3 +1,5 @@
+const { logEvent } = require('../log.cjs');
+
 function runSwitchAction(context) {
   const {
     selected,
@@ -28,6 +30,8 @@ function runSwitchAction(context) {
 
   writeLiveState(nextConfig, nextCredentials, options);
   writeStore(store, options);
+
+  logEvent('manual', `Switched Claude to ${getPreferredDisplayName(selected.metadata)} <${selected.metadata.emailAddress}>`);
 
   const currentAccounts = getDisplayAccounts(store, selected.metadata, selected.credentials);
   const currentPlan = inferPlanType(selected);

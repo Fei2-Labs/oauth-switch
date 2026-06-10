@@ -18,6 +18,7 @@ const removeAction = require('./lib/actions/remove.cjs');
 const listAction = require('./lib/actions/list.cjs');
 const switchAction = require('./lib/actions/switch.cjs');
 const autoSwitchAction = require('./lib/actions/auto-switch.cjs');
+const switchLog = require('./lib/log.cjs');
 
 const {
   getDefaultConfigPath,
@@ -193,6 +194,12 @@ async function main() {
     return;
   }
 
+  // Only the first arg, so an account named "log" can still be selected later.
+  if (rawArgs[0] === 'log') {
+    runLogHistory();
+    return;
+  }
+
   const codexIdx = rawArgs.indexOf('codex');
   if (codexIdx >= 0) {
     runCodex(rawArgs.slice(codexIdx + 1));
@@ -298,8 +305,10 @@ async function main() {
       writeStore(storeToggle, options);
       const name = getPreferredDisplayNameUi(entry.metadata || {});
       if (options.toggleDisabledValue) {
+        switchLog.logEvent('manual', `Disabled Claude account ${name}`);
         console.log(`Disabled [${selectedToggle.index}] ${name}. Auto-switch will skip this account.`);
       } else {
+        switchLog.logEvent('manual', `Enabled Claude account ${name}`);
         console.log(`Enabled [${selectedToggle.index}] ${name}. Auto-switch can pick this account again.`);
       }
       return;
@@ -365,6 +374,17 @@ async function main() {
   }
 }
 
+function runLogHistory() {
+  const lines = switchLog.readRecentLines(50);
+  if (!lines) {
+    console.log('(no switch history)');
+    return;
+  }
+  for (const line of lines) {
+    console.log(line);
+  }
+}
+
 function runAlias(args) {
   const index = args[0];
   const alias = args.slice(1).join(' ');
@@ -423,7 +443,7 @@ async function runAutoSwitch() {
       ensureDir,
     });
   } catch (err) {
-    console.log(`[auto] Claude check failed: ${err.message}`);
+    console.log(switchLog.formatLine('auto', `Claude check failed: ${err.message}`));
   }
 
   try {
@@ -456,7 +476,7 @@ async function runAutoSwitch() {
       });
     }
   } catch (err) {
-    console.log(`[auto] Codex check failed: ${err.message}`);
+    console.log(switchLog.formatLine('auto', `Codex check failed: ${err.message}`));
   }
 }
 
