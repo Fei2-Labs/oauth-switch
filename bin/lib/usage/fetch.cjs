@@ -14,9 +14,13 @@ function fetchUsage(accessToken, cache) {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         if (res.statusCode === 429) {
+          // A 429 from the usage endpoint means OUR CLIENT is being throttled
+          // (too many polls from this machine), NOT that the account hit its
+          // quota. Do not feed it into the rate-limit reset cache (that cache
+          // tracks genuine account limits via seven_day.resets_at below) and
+          // do not report it as rate_limited.
           const retrySecs = res.headers['retry-after'] ? parseInt(res.headers['retry-after'], 10) : null;
-          if (retrySecs) cache.setRateLimitResetAt(retrySecs);
-          resolve({ rate_limited: true, retry_after: retrySecs });
+          resolve({ api_throttled: true, retry_after: Number.isNaN(retrySecs) ? null : retrySecs });
           return;
         }
         if (res.statusCode !== 200) {

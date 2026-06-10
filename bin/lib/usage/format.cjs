@@ -4,6 +4,16 @@ const {
 
 function formatUsageInfo(usage) {
   const lines = [];
+  if (usage.api_throttled) {
+    // Endpoint throttling of this machine's polling, not an account limit.
+    const retrySecs = usage.retry_after ? parseInt(usage.retry_after, 10) : null;
+    if (retrySecs) {
+      lines.push(`Usage API is throttling this machine (HTTP 429). Not an account limit. Retry in ~${retrySecs}s.`);
+    } else {
+      lines.push('Usage API is throttling this machine (HTTP 429). Not an account limit. Try again later.');
+    }
+    return lines;
+  }
   if (usage.rate_limited) {
     const retrySecs = usage.retry_after ? parseInt(usage.retry_after, 10) : null;
     if (retrySecs) {
@@ -38,7 +48,7 @@ function formatUsageInfo(usage) {
 }
 
 function toUsageSnapshot(usage) {
-  if (!usage || usage.rate_limited) return null;
+  if (!usage || usage.rate_limited || usage.api_throttled) return null;
   const hasFiveHour = usage.five_hour && (typeof usage.five_hour.utilization === 'number' || usage.five_hour.resets_at);
   const hasSevenDay = usage.seven_day && (typeof usage.seven_day.utilization === 'number' || usage.seven_day.resets_at);
   if (!hasFiveHour && !hasSevenDay) return null;
@@ -78,15 +88,45 @@ function isAuthFailure(err) {
   return err?.statusCode === 401 || err?.statusCode === 403;
 }
 
+// Non-current account groups are only refetched when their snapshot is
+// missing or older than this. The current group is refreshed every cycle.
+// Compatible with the 2h viability freshness gate in auto-switch.
+const NONCURRENT_REFRESH_MS = 30 * 60 * 1000;
+
+function isSnapshotFresherThan(snapshot, maxAgeMs, now = Date.now()) {
+  if (!snapshot || !snapshot.fetchedAt) return false;
+  const fetched = new Date(snapshot.fetchedAt).getTime();
+  if (Number.isNaN(fetched)) return false;
+  return now - fetched <= maxAgeMs;
+}
+
 async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, options = {}) {
   const refreshOAuthToken = options.refreshOAuthToken || require('./fetch.cjs').refreshOAuthToken;
+  const now = options.now ?? Date.now();
   let currentUsage = null;
   let changed = false;
-  for (const group of getClaudeAccountGroups(store)) {
+  // null, or { retryAfter } when the usage endpoint throttled this machine.
+  let apiThrottled = null;
+
+  // Current account group first: it must be refreshed every cycle, and a
+  // throttle response aborts all remaining fetches in this loop.
+  const groups = getClaudeAccountGroups(store);
+  const hasCurrent = (group) => group.entries.some(({ entry }) => entry.key === currentKey);
+  const orderedGroups = [...groups.filter(hasCurrent), ...groups.filter((g) => !hasCurrent(g))];
+
+  for (const group of orderedGroups) {
     const representative = group.entries.find(({ entry }) => entry?.credentials?.claudeAiOauth?.accessToken)?.entry
       || group.entries[0]?.entry;
     const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
+    const groupHasCurrent = hasCurrent(group);
+    if (!groupHasCurrent) {
+      // Fully disabled groups can never be switch targets: don't spend
+      // usage-API requests on them.
+      if (group.entries.every(({ entry }) => entry.disabled)) continue;
+      // Recent-enough snapshot: skip the refetch to cut polling volume.
+      if (isSnapshotFresherThan(representative.usageSnapshot, NONCURRENT_REFRESH_MS, now)) continue;
+    }
     try {
       let usage;
       try {
@@ -108,9 +148,14 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
         }
         usage = await fetchUsage(refreshed.accessToken);
       }
-      const groupHasCurrent = group.entries.some(({ entry }) => entry.key === currentKey);
       if (groupHasCurrent) {
         currentUsage = usage;
+      }
+      if (usage?.api_throttled) {
+        // Endpoint throttling of this machine: abort all remaining fetches
+        // immediately and keep the old snapshots.
+        apiThrottled = { retryAfter: usage.retry_after ?? null };
+        break;
       }
       const nextSnapshot = toUsageSnapshot(usage);
       if (!nextSnapshot) continue;
@@ -130,7 +175,7 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
       // Keep previous snapshot on failure (token may be revoked).
     }
   }
-  return { currentUsage, changed };
+  return { currentUsage, changed, apiThrottled };
 }
 
 function formatUsagePercent(value) {
@@ -197,6 +242,8 @@ module.exports = {
   formatUsageInfo,
   toUsageSnapshot,
   refreshStoredUsageSnapshots,
+  NONCURRENT_REFRESH_MS,
+  isSnapshotFresherThan,
   formatUsagePercent,
   formatDurationUntil,
   formatResetEstimate,

@@ -130,9 +130,13 @@ The auto-switch daemon checks usage every 5 minutes and switches to the account 
 | 5h utilization | ≥ 80% | < 60% |
 | 7d utilization | ≥ 90% | < 80% |
 
-If all accounts are exhausted, it notifies without switching — unless the current account is fully rate-limited (429), in which case it picks the least-bad option.
+If all accounts are exhausted, it notifies without switching — unless the current account is genuinely rate-limited (a `rate_limited` flag in the usage response body), in which case it picks the least-bad option.
 
-Both Claude Code and Codex use the same quota-aware target selection: before picking a target, the daemon refreshes usage for **all** stored accounts (deduped per credential, so org variants of the same login are fetched once) and persists the snapshots, then picks the viable account with the lowest combined usage (5h weighted 60%, 7d weighted 40%). A snapshot older than 2 hours is treated as stale and never counts as viable — stale or unknown accounts are only used as a last resort when the current account is rate-limited.
+**HTTP 429 from the usage API is endpoint throttling, not an account limit.** It means the usage API is throttling this machine's polling — it says nothing about the account's quota and never triggers a switch. When the daemon receives a 429, it records a per-provider backoff deadline in `~/.oauth-switch/state.json` (the `retry-after` header, capped at 1 hour; 15 minutes when the header is missing) and makes zero usage requests for that provider until the deadline passes.
+
+Both Claude Code and Codex use the same quota-aware target selection: before picking a target, the daemon refreshes usage snapshots and persists them, then picks the viable account with the lowest combined usage (5h weighted 60%, 7d weighted 40%). To keep polling volume low, the **current** account is refreshed every cycle, while **non-current** accounts are only refetched when their snapshot is missing or older than 30 minutes (deduped per credential, so org variants of the same login are fetched once); fully disabled accounts are never polled. A snapshot older than 2 hours is treated as stale and never counts as viable — stale or unknown accounts are only used as a last resort when the current account is rate-limited.
+
+**Anti-ping-pong cooldown:** after a daemon-initiated switch, the daemon will not auto-switch the same provider again for 15 minutes, and the account it switched *from* is excluded as a target for 30 minutes (unless it is the only candidate). Manual switches are never throttled and clear the cooldown for that provider — user intent wins.
 
 If a stored (non-active) Claude account's access token has expired, the daemon automatically refreshes it via the OAuth refresh token and retries the usage fetch, keeping the stored credentials up to date. The live `~/.claude` credentials of the active account are never touched by this refresh; if a refresh fails (e.g. the account was revoked), the previous snapshot is kept and the run continues.
 

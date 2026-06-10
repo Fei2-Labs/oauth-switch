@@ -1,4 +1,5 @@
 const { logEvent } = require('../log.cjs');
+const { clearAutoSwitchCooldown } = require('../store/state.cjs');
 
 function runSwitchAction(context) {
   const {
@@ -32,6 +33,8 @@ function runSwitchAction(context) {
   writeStore(store, options);
 
   logEvent('manual', `Switched Claude to ${getPreferredDisplayName(selected.metadata)} <${selected.metadata.emailAddress}>`);
+  // Manual switches express user intent: reset the auto-switch cooldown.
+  clearAutoSwitchCooldown('claude');
 
   const currentAccounts = getDisplayAccounts(store, selected.metadata, selected.credentials);
   const currentPlan = inferPlanType(selected);

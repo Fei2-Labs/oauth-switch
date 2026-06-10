@@ -10,6 +10,10 @@ const THRESHOLDS = {
 
 const { getDisplayAccounts } = require('../store/accounts.cjs');
 const { logEvent, formatLine } = require('../log.cjs');
+const state = require('../store/state.cjs');
+const { NONCURRENT_REFRESH_MS, isSnapshotFresherThan } = require('../usage/format.cjs');
+
+const { AUTO_SWITCH_COOLDOWN_MS, SWITCHED_FROM_EXCLUDE_MS } = state;
 
 // Timestamped console line for the launchd stdout log (/tmp/oauth-switch-auto.log).
 // persist=true additionally appends the line to the persistent history file
@@ -33,6 +37,10 @@ function notify(title, message) {
 
 function shouldTrigger(usage) {
   if (!usage) return false;
+  // Endpoint throttling (HTTP 429 from the usage API) is OUR polling being
+  // throttled, never an account signal — it must not trigger a switch.
+  if (usage.api_throttled) return false;
+  // A genuine rate_limited flag from a parsed 200 body is an account signal.
   if (usage.rate_limited) return true;
   const fiveH = usage.five_hour?.utilization;
   const sevenD = usage.seven_day?.utilization;
@@ -62,9 +70,19 @@ function isTargetViable(usageSnapshot) {
   return fiveH < THRESHOLDS.target5h && sevenD < THRESHOLDS.target7d;
 }
 
-function pickBestTarget(accounts, currentKey) {
-  const candidates = accounts
-    .filter((a) => !a.current && a.key !== currentKey && a.usageSnapshot && !a.disabled)
+// Anti-ping-pong: drop the account we last auto-switched FROM, unless it is
+// the only candidate left.
+function applyExcludeKey(candidates, excludeKey) {
+  if (!excludeKey) return candidates;
+  const without = candidates.filter((a) => a.key !== excludeKey);
+  return without.length > 0 ? without : candidates;
+}
+
+function pickBestTarget(accounts, currentKey, pickOptions = {}) {
+  const candidates = applyExcludeKey(
+    accounts.filter((a) => !a.current && a.key !== currentKey && a.usageSnapshot && !a.disabled),
+    pickOptions.excludeKey
+  )
     .map((a) => ({
       ...a,
       viable: isTargetViable(a.usageSnapshot),
@@ -96,8 +114,11 @@ function hasUsageData(snapshot) {
 // 2. No viable but snapshot data exists → forced, lowest score.
 // 3. No snapshot data at all → forced, oldest lastUsedAt (legacy behavior),
 //    so a failed refresh never regresses to "no target at all".
-function pickBestCodexTarget(accounts, currentKey) {
-  const candidates = accounts.filter((a) => !a.current && a.key !== currentKey && !a.disabled);
+function pickBestCodexTarget(accounts, currentKey, pickOptions = {}) {
+  const candidates = applyExcludeKey(
+    accounts.filter((a) => !a.current && a.key !== currentKey && !a.disabled),
+    pickOptions.excludeKey
+  );
 
   const scored = candidates
     .filter((a) => hasUsageData(a.usageSnapshot))
@@ -135,11 +156,14 @@ function toCodexUsageSnapshot(usage, fetchedAt = new Date().toISOString()) {
   };
 }
 
-// Refresh usage snapshots for ALL stored Codex accounts, deduped by
-// credential fingerprint so the same token is not fetched twice for org
-// variants. Per-account fetch failures keep the old snapshot and never
-// abort the run. Returns true when any snapshot changed.
-async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetchUsageFn = fetchCodexUsage) {
+// Refresh usage snapshots for stored Codex accounts, deduped by credential
+// fingerprint so the same token is not fetched twice for org variants.
+// Non-current credentials are only refetched when their snapshot is missing
+// or older than NONCURRENT_REFRESH_MS; fully disabled credential groups are
+// never fetched (they can't be targets). Per-account fetch failures keep the
+// old snapshot. An api_throttled response (endpoint throttling) aborts all
+// remaining fetches immediately. Returns { changed, apiThrottled }.
+async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetchUsageFn = fetchCodexUsage, now = Date.now()) {
   const { getCodexCredentialFingerprint } = require('../providers/codex-identity.cjs');
   const usageByFingerprint = new Map();
   const currentFingerprint = currentAuth ? getCodexCredentialFingerprint(currentAuth) : null;
@@ -147,23 +171,45 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
     usageByFingerprint.set(currentFingerprint, currentUsage);
   }
 
+  const fingerprintOf = (entry) => getCodexCredentialFingerprint(entry.auth) || `entry:${entry.key}`;
+  const entriesByFingerprint = new Map();
+  for (const entry of store.accounts || []) {
+    if (!entry?.auth?.tokens?.access_token) continue;
+    const fingerprint = fingerprintOf(entry);
+    if (!entriesByFingerprint.has(fingerprint)) entriesByFingerprint.set(fingerprint, []);
+    entriesByFingerprint.get(fingerprint).push(entry);
+  }
+
   let changed = false;
-  const now = new Date().toISOString();
+  let apiThrottled = null;
+  const nowIso = new Date(now).toISOString();
   for (const [index, entry] of (store.accounts || []).entries()) {
     const accessToken = entry?.auth?.tokens?.access_token;
     if (!accessToken) continue;
-    const fingerprint = getCodexCredentialFingerprint(entry.auth) || `entry:${entry.key}`;
+    const fingerprint = fingerprintOf(entry);
     if (!usageByFingerprint.has(fingerprint)) {
+      const groupEntries = entriesByFingerprint.get(fingerprint) || [entry];
+      // Fully disabled credential groups can never be switch targets.
+      if (groupEntries.every((e) => e.disabled)) continue;
+      // Recent-enough snapshot on any org variant: skip the refetch.
+      if (groupEntries.some((e) => isSnapshotFresherThan(e.usageSnapshot, NONCURRENT_REFRESH_MS, now))) continue;
       try {
-        usageByFingerprint.set(fingerprint, await fetchUsageFn(accessToken));
+        const fetched = await fetchUsageFn(accessToken);
+        if (fetched?.api_throttled) {
+          // Endpoint throttling of this machine: abort all remaining fetches
+          // immediately and keep the old snapshots.
+          apiThrottled = { retryAfter: fetched.retry_after ?? null };
+          break;
+        }
+        usageByFingerprint.set(fingerprint, fetched);
       } catch {
         // Keep the old snapshot for this credential; continue with the rest.
         usageByFingerprint.set(fingerprint, null);
       }
     }
     const usage = usageByFingerprint.get(fingerprint);
-    if (!usage) continue;
-    const snapshot = toCodexUsageSnapshot(usage, now);
+    if (!usage || usage.api_throttled) continue;
+    const snapshot = toCodexUsageSnapshot(usage, nowIso);
     if (!snapshot.five_hour && !snapshot.seven_day) continue;
     const before = JSON.stringify(store.accounts[index].usageSnapshot || null);
     if (before !== JSON.stringify(snapshot)) {
@@ -171,7 +217,30 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
       changed = true;
     }
   }
-  return changed;
+  return { changed, apiThrottled };
+}
+
+// Cooldown gate for daemon-initiated switches: blocks a second auto-switch
+// within AUTO_SWITCH_COOLDOWN_MS, and exposes the key we last switched FROM
+// (within SWITCHED_FROM_EXCLUDE_MS) so target picking can deprioritize it.
+function getAutoSwitchCooldown(provider, now = Date.now()) {
+  const last = state.getLastAutoSwitch(provider);
+  if (!last) return { blocked: false, excludeKey: null };
+  const at = new Date(last.at).getTime();
+  if (Number.isNaN(at) || at > now) return { blocked: false, excludeKey: null };
+  const age = now - at;
+  return {
+    blocked: age < AUTO_SWITCH_COOLDOWN_MS,
+    excludeKey: age < SWITCHED_FROM_EXCLUDE_MS ? (last.fromKey || null) : null,
+  };
+}
+
+function formatTime(msEpoch) {
+  return new Date(msEpoch).toLocaleTimeString();
+}
+
+function throttleRetrySecs(untilMs, now = Date.now()) {
+  return Math.max(0, Math.round((untilMs - now) / 1000));
 }
 
 async function runAutoSwitchClaude(context) {
@@ -200,9 +269,18 @@ async function runAutoSwitchClaude(context) {
     return { switched: false };
   }
 
+  // Endpoint-throttle gate: while active, this run makes ZERO usage requests
+  // for Claude. Console-only — this fires every cycle until the deadline.
+  const throttledUntil = state.getProviderThrottleUntil('claude');
+  if (throttledUntil) {
+    autoLog(`Claude usage API throttled, next attempt at ${formatTime(throttledUntil)}.`);
+    return { switched: false };
+  }
+
   let currentUsage;
+  let refreshThrottled = null;
   try {
-    const { currentUsage: usage, changed } = await refreshStoredUsageSnapshots(
+    const { currentUsage: usage, changed, apiThrottled } = await refreshStoredUsageSnapshots(
       store,
       currentKey,
       (token) => fetchUsage(token, {
@@ -212,13 +290,34 @@ async function runAutoSwitchClaude(context) {
     );
     if (changed) writeStore(store, options);
     currentUsage = usage;
+    refreshThrottled = apiThrottled;
   } catch (err) {
     autoLog(`Failed to fetch usage: ${err.message}`);
     return { switched: false };
   }
 
+  if (refreshThrottled) {
+    // HTTP 429 from the usage endpoint = OUR client is being throttled, not
+    // an account limit. Never switch on it; back off instead.
+    const until = state.setProviderThrottle('claude', refreshThrottled.retryAfter);
+    if (currentUsage?.api_throttled || !currentUsage) {
+      autoLog(`Claude usage API throttled, skipping cycle (retry in ${throttleRetrySecs(until)}s).`, { persist: true });
+      return { switched: false };
+    }
+    // Current account usage was fetched before the throttle hit; continue
+    // this cycle on existing snapshots, future cycles honor the deadline.
+    autoLog(`Claude usage API throttled during snapshot refresh; pausing usage checks until ${formatTime(until)}.`);
+  }
+
   if (!shouldTrigger(currentUsage)) {
     autoLog('Claude Code usage within limits. No switch needed.');
+    return { switched: false };
+  }
+
+  // Anti-ping-pong cooldown for daemon-initiated switches.
+  const cooldown = getAutoSwitchCooldown('claude');
+  if (cooldown.blocked) {
+    autoLog('Claude auto-switch cooldown active, skipping switch.', { persist: true });
     return { switched: false };
   }
 
@@ -227,7 +326,7 @@ async function runAutoSwitchClaude(context) {
   // would still hold the stale snapshots and pickBestTarget would run blind.
   const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
   const isRateLimited = currentUsage?.rate_limited === true;
-  const { target, forced } = pickBestTarget(accounts, currentKey);
+  const { target, forced } = pickBestTarget(accounts, currentKey, { excludeKey: cooldown.excludeKey });
 
   if (!target) {
     sendNotification('OAuth Switch', 'All Claude accounts at capacity. No switch possible.');
@@ -251,16 +350,25 @@ async function runAutoSwitchClaude(context) {
 
   writeLiveState(nextConfig, nextCredentials, options);
   writeStore(store, options);
+  state.recordAutoSwitch('claude', currentKey, target.key);
 
   const name = target.metadata?.emailAddress || target.key;
-  const reason = isRateLimited ? 'rate limited (429)' : 'usage threshold exceeded';
+  const reason = isRateLimited ? 'rate limited' : 'usage threshold exceeded';
   sendNotification('OAuth Switch', `Claude switched to ${name} (${reason}). Restart to apply.`);
   autoLog(`Switched Claude to ${name} (${reason}).`, { persist: true });
   return { switched: true };
 }
 
 async function runAutoSwitchCodex(context) {
-  const { readJson, writeJson, backupFile, AUTH_PATH, STORE_PATH, decodeJwtPayload } = context;
+  const {
+    readJson,
+    writeJson,
+    backupFile,
+    AUTH_PATH,
+    STORE_PATH,
+    fetchUsage: fetchUsageFn = fetchCodexUsage,
+    notify: sendNotification = notify,
+  } = context;
   const { getCodexAccountKey, getDisplayCodexAccounts } = require('../providers/codex-identity.cjs');
 
   const auth = readJson(AUTH_PATH);
@@ -275,11 +383,27 @@ async function runAutoSwitchCodex(context) {
     return { switched: false };
   }
 
+  // Endpoint-throttle gate: while active, this run makes ZERO usage requests
+  // for Codex. Console-only — this fires every cycle until the deadline.
+  const throttledUntil = state.getProviderThrottleUntil('codex');
+  if (throttledUntil) {
+    autoLog(`Codex usage API throttled, next attempt at ${formatTime(throttledUntil)}.`);
+    return { switched: false };
+  }
+
   let currentUsage;
   try {
-    currentUsage = await fetchCodexUsage(auth.tokens.access_token);
+    currentUsage = await fetchUsageFn(auth.tokens.access_token);
   } catch (err) {
     autoLog(`Failed to fetch Codex usage: ${err.message}`);
+    return { switched: false };
+  }
+
+  if (currentUsage?.api_throttled) {
+    // HTTP 429 from the usage endpoint = OUR client is being throttled, not
+    // an account limit. Never switch on it; back off instead.
+    const until = state.setProviderThrottle('codex', currentUsage.retry_after);
+    autoLog(`Codex usage API throttled, skipping cycle (retry in ${throttleRetrySecs(until)}s).`, { persist: true });
     return { switched: false };
   }
 
@@ -288,11 +412,23 @@ async function runAutoSwitchCodex(context) {
     return { switched: false };
   }
 
+  // Anti-ping-pong cooldown for daemon-initiated switches.
+  const cooldown = getAutoSwitchCooldown('codex');
+  if (cooldown.blocked) {
+    autoLog('Codex auto-switch cooldown active, skipping switch.', { persist: true });
+    return { switched: false };
+  }
+
   const currentKey = getCodexAccountKey(auth);
 
-  // Refresh ALL stored accounts' usage before picking, so target selection
-  // never runs on blind/stale data.
-  const snapshotsChanged = await refreshCodexUsageSnapshots(store, auth, currentUsage);
+  // Refresh stored accounts' usage before picking (non-current credentials
+  // only when their snapshot is missing or stale), so target selection never
+  // runs on blind data.
+  const { changed: snapshotsChanged, apiThrottled } = await refreshCodexUsageSnapshots(store, auth, currentUsage, fetchUsageFn);
+  if (apiThrottled) {
+    const until = state.setProviderThrottle('codex', apiThrottled.retryAfter);
+    autoLog(`Codex usage API throttled during snapshot refresh; pausing usage checks until ${formatTime(until)}.`);
+  }
   if (snapshotsChanged) {
     store.updatedAt = new Date().toISOString();
     writeJson(STORE_PATH, store);
@@ -300,16 +436,16 @@ async function runAutoSwitchCodex(context) {
 
   const accounts = getDisplayCodexAccounts(store, auth);
   const isRateLimited = currentUsage?.rate_limited === true;
-  const { target, forced } = pickBestCodexTarget(accounts, currentKey);
+  const { target, forced } = pickBestCodexTarget(accounts, currentKey, { excludeKey: cooldown.excludeKey });
 
   if (!target) {
-    notify('OAuth Switch', 'All Codex accounts at capacity.');
+    sendNotification('OAuth Switch', 'All Codex accounts at capacity.');
     autoLog('All Codex accounts at capacity. No switch possible.', { persist: true });
     return { switched: false };
   }
 
   if (forced && !isRateLimited) {
-    notify('OAuth Switch', 'Codex usage high, but no viable target. Staying put.');
+    sendNotification('OAuth Switch', 'Codex usage high, but no viable target. Staying put.');
     autoLog('Codex usage high, but no viable target. Staying put.', { persist: true });
     return { switched: false };
   }
@@ -321,14 +457,17 @@ async function runAutoSwitchCodex(context) {
   store.updatedAt = new Date().toISOString();
   writeJson(STORE_PATH, store);
   writeJson(AUTH_PATH, target.auth);
+  state.recordAutoSwitch('codex', currentKey, target.key);
 
-  notify('OAuth Switch', `Codex switched to ${target.displayName}. Restart to apply.`);
+  sendNotification('OAuth Switch', `Codex switched to ${target.displayName}. Restart to apply.`);
   autoLog(`Switched Codex to ${target.displayName}.`, { persist: true });
   return { switched: true };
 }
 
 function shouldTriggerCodex(usage) {
   if (!usage) return false;
+  // Endpoint throttling is never an account signal (see shouldTrigger).
+  if (usage.api_throttled) return false;
   if (usage.rate_limited) return true;
   const fiveH = usage.five_hour_percent;
   const weekly = usage.weekly_percent;
@@ -350,7 +489,9 @@ function fetchCodexUsage(accessToken) {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         if (res.statusCode === 429) {
-          resolve({ rate_limited: true });
+          // Endpoint throttling of our polling, not an account limit.
+          const retrySecs = res.headers['retry-after'] ? parseInt(res.headers['retry-after'], 10) : null;
+          resolve({ api_throttled: true, retry_after: Number.isNaN(retrySecs) ? null : retrySecs });
           return;
         }
         if (res.statusCode !== 200) {
@@ -387,6 +528,10 @@ module.exports = {
   runAutoSwitchCodex,
   THRESHOLDS,
   SNAPSHOT_FRESHNESS_MS,
+  NONCURRENT_REFRESH_MS,
+  AUTO_SWITCH_COOLDOWN_MS,
+  SWITCHED_FROM_EXCLUDE_MS,
+  getAutoSwitchCooldown,
   notify,
   shouldTrigger,
   isSnapshotFresh,

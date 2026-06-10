@@ -179,6 +179,7 @@ async function syncUsage() {
 
   let synced = 0;
   let failed = 0;
+  let throttled = false;
   let currentSynced = false;
   const now = new Date().toISOString();
   for (const [idx, account] of store.accounts.entries()) {
@@ -186,6 +187,12 @@ async function syncUsage() {
     if (!accessToken) continue;
     try {
       const usage = await fetchCodexUsage(accessToken);
+      if (usage?.api_throttled) {
+        // Endpoint throttling of this machine: keep the old snapshots and
+        // stop fetching — further requests would only extend the throttle.
+        throttled = true;
+        break;
+      }
       const snapshot = toCodexUsageSnapshot(usage, now);
       store.accounts[idx].usageSnapshot = snapshot;
       synced += 1;
@@ -198,6 +205,7 @@ async function syncUsage() {
   writeStore(store);
   const parts = [`Synced Codex usage for ${synced} account(s).`];
   if (failed > 0) parts.push(`${failed} failed.`);
+  if (throttled) parts.push('Usage API is throttling this machine (HTTP 429); kept previous snapshots for the rest.');
   if (!currentSynced && currentKey) parts.push('Current account was not refreshed.');
   console.log(parts.join(' '));
 }
@@ -254,6 +262,10 @@ async function syncCurrentUsageOnly(auth, store, currentKey) {
 
   try {
     const usage = await fetchCodexUsage(auth.tokens.access_token);
+    if (usage?.api_throttled) {
+      console.log('Codex usage API is throttling this machine (HTTP 429). Kept the previous snapshot; try again later.');
+      return;
+    }
     store.accounts[idx].usageSnapshot = toCodexUsageSnapshot(usage);
     writeStore(store);
     console.log('Synced Codex usage.');
@@ -325,6 +337,8 @@ function switchAccount(index) {
   writeJson(AUTH_PATH, target.auth);
 
   logEvent('manual', `Switched Codex to ${target.displayName}`);
+  // Manual switches express user intent: reset the auto-switch cooldown.
+  require('../store/state.cjs').clearAutoSwitchCooldown('codex');
   console.log(`Switched Codex to [${idx}] ${target.displayName}.`);
   console.log('Restart Codex for the change to take effect.');
 }
