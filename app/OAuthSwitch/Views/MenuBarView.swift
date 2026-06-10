@@ -116,6 +116,11 @@ struct MenuBarView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
+
+            Text(AppVersion.display)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 2)
         }
         .padding(.top, 2)
     }

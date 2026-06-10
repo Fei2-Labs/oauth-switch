@@ -182,7 +182,14 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+
+  if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+    console.log(require('../package.json').version);
+    return;
+  }
+
+  const options = parseArgs(rawArgs);
 
   try {
     const config = readJson(options.configPath);

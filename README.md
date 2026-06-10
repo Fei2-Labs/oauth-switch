@@ -109,6 +109,9 @@ oas auto
 
 # Sync current account into store
 oas sync
+
+# Print the CLI version
+oas --version
 ```
 
 Accounts are captured automatically from local OAuth token files, oauth-switch backup snapshots, and managed Codex homes. Log in with different accounts and run `oas` (or `oas kiro` / `oas codex`) each time. For Codex, run `oas codex add` to create an isolated managed `CODEX_HOME` and keep that account available without replacing the global `~/.codex/auth.json`. Use `oas alias`, `oas kiro alias`, or `oas codex alias` to give accounts memorable names.
@@ -169,6 +172,7 @@ Features:
 - Managed Codex account login from Settings
 - Manual refresh from the menu bar
 - Menu bar warning threshold and balance source configuration in Settings
+- Version footer (`v<version> (<git hash>) <build date>`) in the menu bar window, so you can tell which build is running; `make build` stamps it from `package.json` and git
 
 ---
 

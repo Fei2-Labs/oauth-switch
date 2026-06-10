@@ -188,6 +188,11 @@ function parseArgs(argv) {
 async function main() {
   const rawArgs = process.argv.slice(2);
 
+  if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+    console.log(require('../package.json').version);
+    return;
+  }
+
   const codexIdx = rawArgs.indexOf('codex');
   if (codexIdx >= 0) {
     runCodex(rawArgs.slice(codexIdx + 1));

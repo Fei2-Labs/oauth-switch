@@ -1,6 +1,6 @@
 {
   "name": "oauth-switch",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Multi-account switcher for Claude Code, Codex, and Kiro IDE with auto-switch on rate limits",
   "bin": {
     "oauth-switch": "./bin/oauth-switch.cjs",
