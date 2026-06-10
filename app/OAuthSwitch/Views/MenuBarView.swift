@@ -6,16 +6,18 @@ private enum MenuBarTheme {
     static let cardRadius: CGFloat = 14
     static let rowRadius: CGFloat = 10
     static let windowWidth: CGFloat = 372
+    static let providerRowsMaxHeight: CGFloat = 420
 }
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var expandedProviderIDs: Set<ProviderID> = []
+    @AppStorage("selectedProviderTab") private var selectedProviderTabRawValue: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: MenuBarTheme.sectionSpacing) {
             headerSection
-            providerSections
+            providerTabBar
+            selectedProviderContent
             footerSection
         }
         .frame(width: MenuBarTheme.windowWidth)
@@ -62,30 +64,59 @@ struct MenuBarView: View {
         }
     }
 
-    private var providerSections: some View {
-        VStack(alignment: .leading, spacing: MenuBarTheme.sectionSpacing) {
+    private var selectedSection: ProviderSectionSnapshot? {
+        let sections = appState.providerSections
+        if let match = sections.first(where: { $0.id.rawValue == selectedProviderTabRawValue }) {
+            return match
+        }
+        return sections.first
+    }
+
+    private var providerTabBar: some View {
+        HStack(spacing: 4) {
             ForEach(appState.providerSections) { section in
-                ProviderSectionView(
+                ProviderTabButton(
                     section: section,
-                    isExpanded: expandedProviderIDs.contains(section.id),
-                    onToggleExpanded: {
-                        toggleProvider(section.id)
-                    },
-                    onAction: { action in
-                        appState.perform(action)
+                    isSelected: section.id == selectedSection?.id,
+                    onSelect: {
+                        selectedProviderTabRawValue = section.id.rawValue
                     }
                 )
             }
         }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: MenuBarTheme.cardRadius, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: MenuBarTheme.cardRadius, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
     }
 
-    private func toggleProvider(_ providerID: ProviderID) {
-        if expandedProviderIDs.contains(providerID) {
-            expandedProviderIDs.remove(providerID)
-        } else {
-            expandedProviderIDs.insert(providerID)
+    @ViewBuilder
+    private var selectedProviderContent: some View {
+        if let section = selectedSection {
+            if section.isLoading {
+                EmptySectionState(text: "Refreshing local state…")
+            } else if section.rows.isEmpty {
+                EmptySectionState(text: section.emptyMessage)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 6) {
+                        ForEach(section.rows) { row in
+                            ProviderRowView(row: row) { action in
+                                appState.perform(action)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: MenuBarTheme.providerRowsMaxHeight)
+            }
         }
     }
+
     private var footerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let msg = appState.lastSwitchMessage, !msg.isEmpty {
@@ -126,65 +157,51 @@ struct MenuBarView: View {
     }
 }
 
-struct ProviderSectionView: View {
+struct ProviderTabButton: View {
     let section: ProviderSectionSnapshot
-    let isExpanded: Bool
-    let onToggleExpanded: () -> Void
-    let onAction: (ProviderRowAction) -> Void
+    let isSelected: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                onToggleExpanded()
-            } label: {
-                HStack {
-                    HStack(spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 10)
-                        ProviderIconView(provider: section.id, size: 18, cornerRadius: 5, tint: .white.opacity(0.92))
-                        Text(section.title)
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                    Spacer()
-                    if section.isLoading {
-                        StatusPill(title: "Loading", tone: .neutral)
-                    } else if !section.rows.isEmpty {
-                        Text("\(section.rows.count)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isExpanded {
-                Group {
-                    if section.isLoading {
-                        EmptySectionState(text: "Refreshing local state…")
-                    } else if section.rows.isEmpty {
-                        EmptySectionState(text: section.emptyMessage)
-                    } else {
-                        VStack(spacing: 6) {
-                            ForEach(section.rows) { row in
-                                ProviderRowView(row: row, onAction: onAction)
-                            }
-                        }
-                    }
+        Button(action: onSelect) {
+            HStack(spacing: 5) {
+                ProviderIconView(
+                    provider: section.id,
+                    size: 14,
+                    cornerRadius: 4,
+                    tint: isSelected ? .white.opacity(0.95) : .white.opacity(0.65)
+                )
+                Text(section.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                if !section.isLoading && !section.rows.isEmpty {
+                    Text("\(section.rows.count)")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(isSelected ? 0.16 : 0.08))
+                        )
                 }
             }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: MenuBarTheme.rowRadius, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.22) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: MenuBarTheme.rowRadius, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: MenuBarTheme.rowRadius, style: .continuous))
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: MenuBarTheme.cardRadius, style: .continuous)
-                .fill(Color.white.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: MenuBarTheme.cardRadius, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .buttonStyle(.plain)
     }
 }
 
