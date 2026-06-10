@@ -167,15 +167,10 @@ struct ProviderTabButton: View {
             HStack(spacing: 5) {
                 ProviderIconView(
                     provider: section.id,
-                    size: 14,
+                    size: 17,
                     cornerRadius: 4,
                     tint: isSelected ? .white.opacity(0.95) : .white.opacity(0.65)
                 )
-                Text(section.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                 if !section.isLoading && !section.rows.isEmpty {
                     Text("\(section.rows.count)")
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -202,6 +197,7 @@ struct ProviderTabButton: View {
             .contentShape(RoundedRectangle(cornerRadius: MenuBarTheme.rowRadius, style: .continuous))
         }
         .buttonStyle(.plain)
+        .help(section.title)
     }
 }
 
