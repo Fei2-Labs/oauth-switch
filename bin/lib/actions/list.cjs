@@ -1,3 +1,5 @@
+const state = require('../store/state.cjs');
+
 async function runListAction(context) {
   const {
     synced,
@@ -26,9 +28,16 @@ async function runListAction(context) {
   }
 
   const accessToken = credentials?.claudeAiOauth?.accessToken;
-  if (accessToken) {
+  // Endpoint-throttle gate (same as the `usage` action): while the 429
+  // backoff deadline is active, make ZERO usage requests; the account rows
+  // below render the stored snapshots. --force bypasses the gate.
+  const throttledUntil = options.force ? null : state.getProviderThrottleUntil('claude');
+  if (accessToken && throttledUntil) {
+    console.log(`Usage API throttled, showing cached data, next attempt at ${new Date(throttledUntil).toLocaleTimeString()}.`);
+    console.log('');
+  } else if (accessToken) {
     try {
-      const { currentUsage, changed } = await refreshStoredUsageSnapshots(
+      const { currentUsage, changed, apiThrottled } = await refreshStoredUsageSnapshots(
         store,
         getAccountKey(config.oauthAccount),
         (token) => fetchUsage(token, {
@@ -38,6 +47,13 @@ async function runListAction(context) {
       );
       if (changed) {
         writeStore(store, options);
+      }
+      if (apiThrottled) {
+        // Record the new backoff deadline (exponential on consecutive 429s).
+        state.setProviderThrottle('claude', apiThrottled.retryAfter);
+      } else if (currentUsage) {
+        // Successful fetch: end any throttle episode and reset the streak.
+        state.resetProviderThrottle('claude');
       }
       if (options.showUsage && currentUsage) {
         console.log('--- Usage ---');

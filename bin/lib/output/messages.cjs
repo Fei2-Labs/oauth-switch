@@ -4,6 +4,7 @@ function getListGuidance(usageCommand) {
     `Run ${usageCommand} --remove <index> to remove a stored account.`,
     `Run ${usageCommand} --disable <index> to keep an account but skip it during auto-switch (--enable <index> to undo).`,
     `Run ${usageCommand} log to show recent switch history (manual and auto).`,
+    `Run ${usageCommand} usage to refresh usage from the API; while a 429 backoff is active it shows cached data (add --force to bypass).`,
   ];
 }
 

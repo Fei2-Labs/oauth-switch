@@ -393,7 +393,9 @@ test('Claude 429: api_throttled skips the cycle and writes a throttle deadline',
   assert.equal(writes.live, 0);
   const until = stateStore.getProviderThrottleUntil('claude');
   assert.ok(until, 'throttle deadline must be persisted');
-  assert.ok(until >= before + 590 * 1000 && until <= Date.now() + 610 * 1000);
+  // retry-after 600s is shorter than the 15-minute backoff floor, so the
+  // exponential backoff (streak 0 -> 15 min) wins.
+  assert.ok(until >= before + 14 * 60 * 1000 && until <= Date.now() + 16 * 60 * 1000);
 });
 
 test('Claude throttle deadline suppresses all usage fetches', async () => {
@@ -745,6 +747,132 @@ test('refreshCodexUsageSnapshots aborts remaining fetches on api_throttled and k
   assert.equal(changed, false);
   assert.deepEqual(store.accounts[0].usageSnapshot, oldSnapshot);
   assert.equal(store.accounts[1].usageSnapshot, undefined);
+});
+
+// --- Exponential throttle backoff in the daemon ---------------------------------
+
+// Force the persisted deadline into the past while keeping the streak, so the
+// next daemon cycle gets past the gate and takes a fresh 429.
+function expireProviderDeadline(provider) {
+  const current = stateStore.readState();
+  current.providers[provider].throttledUntil = new Date(Date.now() - 1000).toISOString();
+  stateStore.writeState(current);
+}
+
+test('Claude consecutive daemon 429s double the backoff: 15 -> 30 -> 60 minutes', async () => {
+  freshStatePath();
+  const minute = 60 * 1000;
+  const throttledContext = () => makeClaudeContext({
+    refreshStoredUsageSnapshots: async () => ({
+      currentUsage: { api_throttled: true, retry_after: null },
+      changed: false,
+      apiThrottled: { retryAfter: null },
+    }),
+  });
+
+  for (const expectedMinutes of [15, 30, 60, 60]) {
+    const before = Date.now();
+    const result = await runAutoSwitchClaude(throttledContext().ctx);
+    assert.equal(result.switched, false);
+    const until = stateStore.getProviderThrottleUntil('claude');
+    assert.ok(
+      until >= before + (expectedMinutes - 1) * minute && until <= Date.now() + (expectedMinutes + 1) * minute,
+      `expected ~${expectedMinutes} min deadline, got ${(until - before) / minute} min`
+    );
+    expireProviderDeadline('claude');
+  }
+});
+
+test('Claude daemon honors a retry-after longer than the computed backoff', async () => {
+  freshStatePath();
+  const { ctx } = makeClaudeContext({
+    refreshStoredUsageSnapshots: async () => ({
+      currentUsage: { api_throttled: true, retry_after: 2400 },
+      changed: false,
+      apiThrottled: { retryAfter: 2400 }, // 40 min > 15 min backoff
+    }),
+  });
+
+  const before = Date.now();
+  await runAutoSwitchClaude(ctx);
+  const until = stateStore.getProviderThrottleUntil('claude');
+  assert.ok(until >= before + 2390 * 1000 && until <= Date.now() + 2410 * 1000);
+});
+
+test('Claude successful usage fetch resets the throttle streak', async () => {
+  freshStatePath();
+  // Leftover streak from an expired throttle episode.
+  stateStore.setProviderThrottle('claude', null, Date.now() - 60 * 60 * 1000);
+  stateStore.setProviderThrottle('claude', null, Date.now() - 40 * 60 * 1000);
+  assert.equal(stateStore.getProviderThrottleStreak('claude'), 2);
+  assert.equal(stateStore.getProviderThrottleUntil('claude'), null);
+
+  const { ctx } = makeClaudeContext(); // successful usage fetch
+  const result = await runAutoSwitchClaude(ctx);
+
+  assert.equal(result.switched, true);
+  assert.equal(stateStore.getProviderThrottleStreak('claude'), 0);
+  // After the reset, the next 429 starts the curve over at 15 minutes.
+  const now = Date.now();
+  assert.equal(stateStore.setProviderThrottle('claude', null, now), now + 15 * 60 * 1000);
+});
+
+test('Codex successful usage fetch resets the throttle streak', async () => {
+  freshStatePath();
+  stateStore.setProviderThrottle('codex', null, Date.now() - 60 * 60 * 1000); // expired, streak 1
+  assert.equal(stateStore.getProviderThrottleStreak('codex'), 1);
+
+  const auth = { tokens: { access_token: 'cur-tok', id_token: 'id-cur' } };
+  const store = {
+    accounts: [
+      { key: 'a', auth },
+      { key: 'b', auth: { tokens: { access_token: 'b-tok', id_token: 'id-b' } } },
+    ],
+  };
+  const result = await runAutoSwitchCodex({
+    readJson: (p) => (p === 'AUTH' ? auth : store),
+    writeJson: () => {},
+    backupFile: () => {},
+    AUTH_PATH: 'AUTH',
+    STORE_PATH: 'STORE',
+    fetchUsage: async () => ({ five_hour_percent: 10, weekly_percent: 10 }),
+    notify: () => {},
+  });
+
+  assert.equal(result.switched, false); // within limits
+  assert.equal(stateStore.getProviderThrottleStreak('codex'), 0);
+});
+
+test('Codex consecutive daemon 429s double the backoff deadline', async () => {
+  freshStatePath();
+  const minute = 60 * 1000;
+  const auth = { tokens: { access_token: 'cur-tok', id_token: 'id-cur' } };
+  const store = {
+    accounts: [
+      { key: 'a', auth },
+      { key: 'b', auth: { tokens: { access_token: 'b-tok', id_token: 'id-b' } } },
+    ],
+  };
+  const runThrottledCycle = () => runAutoSwitchCodex({
+    readJson: (p) => (p === 'AUTH' ? auth : store),
+    writeJson: () => {},
+    backupFile: () => { throw new Error('must not switch'); },
+    AUTH_PATH: 'AUTH',
+    STORE_PATH: 'STORE',
+    fetchUsage: async () => ({ api_throttled: true, retry_after: null }),
+    notify: () => {},
+  });
+
+  for (const expectedMinutes of [15, 30, 60]) {
+    const before = Date.now();
+    await runThrottledCycle();
+    const until = stateStore.getProviderThrottleUntil('codex');
+    assert.ok(
+      until >= before + (expectedMinutes - 1) * minute && until <= Date.now() + (expectedMinutes + 1) * minute,
+      `expected ~${expectedMinutes} min deadline, got ${(until - before) / minute} min`
+    );
+    expireProviderDeadline('codex');
+  }
 });
 
 test('non-auth fetch failure does not attempt OAuth refresh', async () => {

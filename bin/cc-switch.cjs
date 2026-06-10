@@ -91,6 +91,7 @@ function parseArgs(argv) {
     toggleDisabledValue: null,
     toggleIndex: null,
     showUsage: settings.showUsage !== false,
+    force: false,
     selector: '',
   };
 
@@ -127,6 +128,12 @@ function parseArgs(argv) {
     }
     if (current === '--usage' || current === 'usage') {
       options.usageOnly = true;
+      continue;
+    }
+    if (current === '--force') {
+      // Bypass the usage-API throttle gate (manual escape hatch). The menu
+      // bar app's timer-driven refresh must never pass this flag.
+      options.force = true;
       continue;
     }
     if (current === '--remove' || current === 'remove') {

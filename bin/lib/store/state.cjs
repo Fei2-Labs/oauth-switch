@@ -2,12 +2,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-// Small persistent runtime state for the auto-switch daemon
-// (~/.oauth-switch/state.json). Tracks, per provider:
+// Small persistent runtime state for the auto-switch daemon and the CLI
+// usage commands (~/.oauth-switch/state.json). Tracks, per provider:
 //   - throttledUntil: usage-API endpoint throttling deadline (HTTP 429 from
 //     the usage endpoint means OUR CLIENT is being throttled, not that the
-//     account hit its quota). While active, auto-switch makes zero usage
-//     requests for that provider.
+//     account hit its quota). While active, auto-switch AND the usage CLI
+//     paths make zero usage requests for that provider (CLI: unless --force).
+//   - throttleStreak: consecutive-429 count driving the exponential backoff
+//     curve 15 min -> 30 min -> 60 min (capped). A successful usage fetch
+//     resets it.
 //   - lastAutoSwitch: { fromKey, toKey, at } of the last daemon-initiated
 //     switch, used for the anti-ping-pong cooldown. Manual switches clear it.
 // Corrupt or missing files fall back to defaults; write failures are
@@ -70,18 +73,42 @@ function getProviderThrottleUntil(provider, now = Date.now(), statePath = getSta
   return until;
 }
 
-// Records an endpoint-throttle deadline: now + retry-after (capped at 1h),
-// or 15 minutes when the header was missing. Returns the deadline (ms epoch).
+// Consecutive-429 count for the provider's usage endpoint (0 when clean).
+function getProviderThrottleStreak(provider, statePath = getStatePath()) {
+  const entry = getProviderState(readState(statePath), provider);
+  return Number.isInteger(entry.throttleStreak) && entry.throttleStreak > 0 ? entry.throttleStreak : 0;
+}
+
+// Records an endpoint-throttle deadline with exponential backoff on the
+// consecutive-429 streak: 15 min -> 30 min -> 60 min (capped at 1h). When the
+// 429 carries a retry-after LONGER than the computed backoff, the longer
+// value wins (still capped at 1h). Increments the streak; a successful usage
+// fetch resets it via resetProviderThrottle(). Returns the deadline (ms epoch).
 function setProviderThrottle(provider, retryAfterSecs, now = Date.now(), statePath = getStatePath()) {
-  const durationMs = typeof retryAfterSecs === 'number' && Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+  const streak = getProviderThrottleStreak(provider, statePath);
+  const backoffMs = Math.min(THROTTLE_DEFAULT_MS * 2 ** streak, THROTTLE_MAX_MS);
+  const retryAfterMs = typeof retryAfterSecs === 'number' && Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
     ? Math.min(retryAfterSecs * 1000, THROTTLE_MAX_MS)
-    : THROTTLE_DEFAULT_MS;
-  const until = now + durationMs;
+    : 0;
+  const until = now + Math.max(backoffMs, retryAfterMs);
   updateProviderState(provider, (entry) => {
     entry.throttledUntil = new Date(until).toISOString();
+    entry.throttleStreak = streak + 1;
     return entry;
   }, statePath);
   return until;
+}
+
+// A successful usage fetch ends the throttle episode: clears the deadline
+// and resets the consecutive-429 streak. No-op (and no write) when clean.
+function resetProviderThrottle(provider, statePath = getStatePath()) {
+  const entry = getProviderState(readState(statePath), provider);
+  if (!entry.throttledUntil && !entry.throttleStreak) return;
+  updateProviderState(provider, (current) => {
+    delete current.throttledUntil;
+    delete current.throttleStreak;
+    return current;
+  }, statePath);
 }
 
 // Records a daemon-initiated switch for the anti-ping-pong cooldown.
@@ -122,7 +149,9 @@ module.exports = {
   readState,
   writeState,
   getProviderThrottleUntil,
+  getProviderThrottleStreak,
   setProviderThrottle,
+  resetProviderThrottle,
   recordAutoSwitch,
   getLastAutoSwitch,
   clearAutoSwitchCooldown,

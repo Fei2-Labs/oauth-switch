@@ -26,7 +26,10 @@ class AppState: ObservableObject {
     @Published var lastCheckTime: Date?
     @Published var lastSwitchMessage: String?
     @Published var loadingProviders: Set<ProviderID> = Set(ProviderID.allCases)
-    @Published var refreshIntervalSeconds: Int = UserDefaults.standard.integer(forKey: PreferenceKey.refreshIntervalSeconds) == 0 ? 60 : UserDefaults.standard.integer(forKey: PreferenceKey.refreshIntervalSeconds) {
+    // Default 15 minutes: the timer-driven refresh shells out to `usage` /
+    // `codex sync-usage`, and anything more frequent risks usage-API 429
+    // endpoint throttling. Existing user-chosen values are preserved.
+    @Published var refreshIntervalSeconds: Int = UserDefaults.standard.integer(forKey: PreferenceKey.refreshIntervalSeconds) == 0 ? 900 : UserDefaults.standard.integer(forKey: PreferenceKey.refreshIntervalSeconds) {
         didSet {
             UserDefaults.standard.set(refreshIntervalSeconds, forKey: PreferenceKey.refreshIntervalSeconds)
             startPolling()

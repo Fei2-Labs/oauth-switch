@@ -10,6 +10,9 @@ struct SettingsView: View {
                     Text("60 seconds").tag(60)
                     Text("120 seconds").tag(120)
                     Text("300 seconds").tag(300)
+                    Text("15 minutes").tag(900)
+                    Text("30 minutes").tag(1800)
+                    Text("60 minutes").tag(3600)
                 }
 
                 LabeledContent("Current interval") {

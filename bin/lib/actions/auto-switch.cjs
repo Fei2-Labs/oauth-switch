@@ -296,9 +296,16 @@ async function runAutoSwitchClaude(context) {
     return { switched: false };
   }
 
+  if (!refreshThrottled && currentUsage && !currentUsage.api_throttled) {
+    // Successful usage fetch: end any throttle episode and reset the
+    // consecutive-429 backoff streak so the next 429 starts at 15 minutes.
+    state.resetProviderThrottle('claude');
+  }
+
   if (refreshThrottled) {
     // HTTP 429 from the usage endpoint = OUR client is being throttled, not
-    // an account limit. Never switch on it; back off instead.
+    // an account limit. Never switch on it; back off instead (exponential:
+    // 15 -> 30 -> 60 min on consecutive 429s).
     const until = state.setProviderThrottle('claude', refreshThrottled.retryAfter);
     if (currentUsage?.api_throttled || !currentUsage) {
       autoLog(`Claude usage API throttled, skipping cycle (retry in ${throttleRetrySecs(until)}s).`, { persist: true });
@@ -401,11 +408,16 @@ async function runAutoSwitchCodex(context) {
 
   if (currentUsage?.api_throttled) {
     // HTTP 429 from the usage endpoint = OUR client is being throttled, not
-    // an account limit. Never switch on it; back off instead.
+    // an account limit. Never switch on it; back off instead (exponential:
+    // 15 -> 30 -> 60 min on consecutive 429s).
     const until = state.setProviderThrottle('codex', currentUsage.retry_after);
     autoLog(`Codex usage API throttled, skipping cycle (retry in ${throttleRetrySecs(until)}s).`, { persist: true });
     return { switched: false };
   }
+
+  // Successful usage fetch: end any throttle episode and reset the
+  // consecutive-429 backoff streak so the next 429 starts at 15 minutes.
+  state.resetProviderThrottle('codex');
 
   if (!shouldTriggerCodex(currentUsage)) {
     autoLog('Codex usage within limits. No switch needed.');

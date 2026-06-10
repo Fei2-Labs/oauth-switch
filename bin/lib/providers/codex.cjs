@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const { fetchCodexUsage, toCodexUsageSnapshot } = require('../actions/auto-switch.cjs');
 const { logEvent } = require('../log.cjs');
+const state = require('../store/state.cjs');
 const {
   decodeJwtPayload,
   getCodexAccountKey,
@@ -169,28 +170,56 @@ function syncCurrentAuth() {
   return { store, currentKey: key, importedBackups, importedManagedHomes };
 }
 
-async function syncUsage() {
-  const { store, currentKey } = syncCurrentAuth();
+function formatCachedCodexUsage(snapshot) {
+  if (!snapshot) return 'no cached usage';
+  const fiveH = typeof snapshot.five_hour?.utilization === 'number' ? `${Math.round(snapshot.five_hour.utilization)}%` : '?';
+  const sevenD = typeof snapshot.seven_day?.utilization === 'number' ? `${Math.round(snapshot.seven_day.utilization)}%` : '?';
+  return `5H:${fiveH} | 7D:${sevenD}`;
+}
+
+// opts.fetchUsage / opts.syncAuth / opts.saveStore are injectable for tests
+// so no real network, ~/.codex, or ~/.CodexMultiAccounts.json is touched.
+async function syncUsage(opts = {}) {
+  const {
+    force = false,
+    fetchUsage = fetchCodexUsage,
+    syncAuth = syncCurrentAuth,
+    saveStore = writeStore,
+  } = opts;
+
+  const { store, currentKey } = syncAuth();
   if (store.accounts.length === 0) {
     console.log('No Codex accounts stored.');
     process.exitCode = 1;
     return;
   }
 
+  // Endpoint-throttle gate: while the 429 backoff deadline is active, make
+  // ZERO usage requests and print the cached snapshots instead. --force is
+  // the genuinely manual escape hatch; the menu bar app must never pass it.
+  const throttledUntil = force ? null : state.getProviderThrottleUntil('codex');
+  if (throttledUntil) {
+    console.log(`Codex usage API throttled, showing cached data, next attempt at ${new Date(throttledUntil).toLocaleTimeString()}.`);
+    store.accounts.forEach((account, idx) => {
+      console.log(`  [${idx}] ${account.displayName || account.key}: ${formatCachedCodexUsage(account.usageSnapshot)}`);
+    });
+    return;
+  }
+
   let synced = 0;
   let failed = 0;
-  let throttled = false;
+  let throttled = null;
   let currentSynced = false;
   const now = new Date().toISOString();
   for (const [idx, account] of store.accounts.entries()) {
     const accessToken = account.auth?.tokens?.access_token;
     if (!accessToken) continue;
     try {
-      const usage = await fetchCodexUsage(accessToken);
+      const usage = await fetchUsage(accessToken);
       if (usage?.api_throttled) {
         // Endpoint throttling of this machine: keep the old snapshots and
         // stop fetching — further requests would only extend the throttle.
-        throttled = true;
+        throttled = { retryAfter: usage.retry_after ?? null };
         break;
       }
       const snapshot = toCodexUsageSnapshot(usage, now);
@@ -202,10 +231,20 @@ async function syncUsage() {
     }
   }
 
-  writeStore(store);
+  let throttledUntilMs = null;
+  if (throttled) {
+    // Record the new backoff deadline (exponential on consecutive 429s) so
+    // every other caller stops hammering the endpoint.
+    throttledUntilMs = state.setProviderThrottle('codex', throttled.retryAfter);
+  } else if (synced > 0) {
+    // Successful fetch: end any throttle episode and reset the streak.
+    state.resetProviderThrottle('codex');
+  }
+
+  saveStore(store);
   const parts = [`Synced Codex usage for ${synced} account(s).`];
   if (failed > 0) parts.push(`${failed} failed.`);
-  if (throttled) parts.push('Usage API is throttling this machine (HTTP 429); kept previous snapshots for the rest.');
+  if (throttledUntilMs) parts.push(`Usage API is throttling this machine (HTTP 429); kept previous snapshots, next attempt at ${new Date(throttledUntilMs).toLocaleTimeString()}.`);
   if (!currentSynced && currentKey) parts.push('Current account was not refreshed.');
   console.log(parts.join(' '));
 }
@@ -405,7 +444,10 @@ function setAccountDisabled(index, disabled) {
 }
 
 async function runCodex(args) {
-  const subcommand = args[0];
+  // --force bypasses the usage-API throttle gate (manual escape hatch).
+  const force = args.includes('--force');
+  const positional = args.filter((arg) => arg !== '--force');
+  const subcommand = positional[0];
 
   if (!subcommand) {
     listAccounts();
@@ -413,7 +455,7 @@ async function runCodex(args) {
   }
 
   if (subcommand === 'sync-usage') {
-    await syncUsage();
+    await syncUsage({ force });
     return;
   }
 
@@ -423,22 +465,22 @@ async function runCodex(args) {
   }
 
   if (subcommand === 'remove') {
-    removeAccount(args[1]);
+    removeAccount(positional[1]);
     return;
   }
 
   if (subcommand === 'disable') {
-    setAccountDisabled(args[1], true);
+    setAccountDisabled(positional[1], true);
     return;
   }
 
   if (subcommand === 'enable') {
-    setAccountDisabled(args[1], false);
+    setAccountDisabled(positional[1], false);
     return;
   }
 
   if (subcommand === 'alias') {
-    labelAccount(args[1], args.slice(2).join(' '));
+    labelAccount(positional[1], positional.slice(2).join(' '));
     return;
   }
 
@@ -464,4 +506,4 @@ function labelAccount(index, newLabel) {
   console.log(`Renamed [${idx}] to "${newLabel}".`);
 }
 
-module.exports = { runCodex };
+module.exports = { runCodex, syncUsage };

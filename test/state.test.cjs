@@ -10,7 +10,9 @@ const {
   readState,
   writeState,
   getProviderThrottleUntil,
+  getProviderThrottleStreak,
   setProviderThrottle,
+  resetProviderThrottle,
   recordAutoSwitch,
   getLastAutoSwitch,
   clearAutoSwitchCooldown,
@@ -46,13 +48,81 @@ test('setProviderThrottle stores now + retry-after and is readable until the dea
 });
 
 test('setProviderThrottle caps retry-after at 1 hour and defaults to 15 minutes', () => {
+  const now = Date.now();
+
+  // Fresh state per call: with streak 0 the backoff floor is 15 minutes.
+  assert.equal(setProviderThrottle('claude', 7200, now, tmpStatePath()), now + THROTTLE_MAX_MS);
+  assert.equal(setProviderThrottle('claude', null, now, tmpStatePath()), now + THROTTLE_DEFAULT_MS);
+  assert.equal(setProviderThrottle('claude', 0, now, tmpStatePath()), now + THROTTLE_DEFAULT_MS);
+  assert.equal(setProviderThrottle('claude', Number.NaN, now, tmpStatePath()), now + THROTTLE_DEFAULT_MS);
+});
+
+test('consecutive throttles back off exponentially: 15 -> 30 -> 60 -> 60 minutes', () => {
+  const statePath = tmpStatePath();
+  const minute = 60 * 1000;
+  let now = Date.now();
+
+  assert.equal(setProviderThrottle('claude', null, now, statePath), now + 15 * minute);
+  assert.equal(getProviderThrottleStreak('claude', statePath), 1);
+
+  now += 16 * minute;
+  assert.equal(setProviderThrottle('claude', null, now, statePath), now + 30 * minute);
+
+  now += 31 * minute;
+  assert.equal(setProviderThrottle('claude', null, now, statePath), now + 60 * minute);
+
+  now += 61 * minute;
+  assert.equal(setProviderThrottle('claude', null, now, statePath), now + 60 * minute); // capped
+  assert.equal(getProviderThrottleStreak('claude', statePath), 4);
+});
+
+test('a longer retry-after beats the computed backoff, still capped at 1 hour', () => {
   const statePath = tmpStatePath();
   const now = Date.now();
 
+  // Streak 0: backoff 15 min, retry-after 40 min is longer and wins.
+  assert.equal(setProviderThrottle('claude', 2400, now, statePath), now + 2400 * 1000);
+  // Streak 1: backoff 30 min, retry-after 10 min is shorter — backoff wins.
+  assert.equal(setProviderThrottle('claude', 600, now, statePath), now + 30 * 60 * 1000);
+  // Streak 2: retry-after 2h capped at 1h (same as the backoff cap).
   assert.equal(setProviderThrottle('claude', 7200, now, statePath), now + THROTTLE_MAX_MS);
+});
+
+test('resetProviderThrottle clears the deadline and streak; the curve restarts at 15 minutes', () => {
+  const statePath = tmpStatePath();
+  const now = Date.now();
+  setProviderThrottle('claude', null, now, statePath);
+  setProviderThrottle('claude', null, now, statePath);
+  assert.equal(getProviderThrottleStreak('claude', statePath), 2);
+
+  resetProviderThrottle('claude', statePath);
+  assert.equal(getProviderThrottleStreak('claude', statePath), 0);
+  assert.equal(getProviderThrottleUntil('claude', now, statePath), null);
   assert.equal(setProviderThrottle('claude', null, now, statePath), now + THROTTLE_DEFAULT_MS);
-  assert.equal(setProviderThrottle('claude', 0, now, statePath), now + THROTTLE_DEFAULT_MS);
-  assert.equal(setProviderThrottle('claude', Number.NaN, now, statePath), now + THROTTLE_DEFAULT_MS);
+});
+
+test('resetProviderThrottle preserves other provider state and lastAutoSwitch', () => {
+  const statePath = tmpStatePath();
+  const now = Date.now();
+  setProviderThrottle('claude', null, now, statePath);
+  setProviderThrottle('codex', null, now, statePath);
+  recordAutoSwitch('claude', 'uuid:a', 'uuid:b', now, statePath);
+
+  resetProviderThrottle('claude', statePath);
+  assert.equal(getProviderThrottleUntil('claude', now, statePath), null);
+  assert.equal(getProviderThrottleUntil('codex', now, statePath), now + THROTTLE_DEFAULT_MS);
+  assert.equal(getLastAutoSwitch('claude', statePath).toKey, 'uuid:b');
+});
+
+test('the streak survives an expired deadline until a success resets it', () => {
+  const statePath = tmpStatePath();
+  const past = Date.now() - 20 * 60 * 1000;
+  setProviderThrottle('claude', null, past, statePath); // deadline already expired
+
+  const now = Date.now();
+  assert.equal(getProviderThrottleUntil('claude', now, statePath), null);
+  // The next 429 still doubles: 30 minutes, not 15.
+  assert.equal(setProviderThrottle('claude', null, now, statePath), now + 30 * 60 * 1000);
 });
 
 test('recordAutoSwitch / getLastAutoSwitch / clearAutoSwitchCooldown roundtrip', () => {
@@ -73,10 +143,10 @@ test('recordAutoSwitch / getLastAutoSwitch / clearAutoSwitchCooldown roundtrip',
 test('state writes for one provider preserve the other provider entries', () => {
   const statePath = tmpStatePath();
   const now = Date.now();
-  setProviderThrottle('claude', 600, now, statePath);
+  setProviderThrottle('claude', 1200, now, statePath); // longer than the 15-min backoff floor
   recordAutoSwitch('codex', 'account:x', 'account:y', now, statePath);
 
-  assert.equal(getProviderThrottleUntil('claude', now, statePath), now + 600 * 1000);
+  assert.equal(getProviderThrottleUntil('claude', now, statePath), now + 1200 * 1000);
   assert.equal(getLastAutoSwitch('codex', statePath).toKey, 'account:y');
 });
 

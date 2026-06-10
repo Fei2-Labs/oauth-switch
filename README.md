@@ -104,6 +104,16 @@ oas codex enable 1
 # Show Windsurf quota from the local Windsurf state database
 oas windsurf
 
+# Show Claude usage (cached while a usage-API 429 backoff is active)
+oas usage
+
+# Refresh Codex usage snapshots for all stored accounts (same backoff gate)
+oas codex sync-usage
+
+# Bypass the 429 backoff gate (manual escape hatch; a 429 records the next deadline)
+oas usage --force
+oas codex sync-usage --force
+
 # Run auto-switch check manually
 oas auto
 
@@ -132,7 +142,9 @@ The auto-switch daemon checks usage every 5 minutes and switches to the account 
 
 If all accounts are exhausted, it notifies without switching — unless the current account is genuinely rate-limited (a `rate_limited` flag in the usage response body), in which case it picks the least-bad option.
 
-**HTTP 429 from the usage API is endpoint throttling, not an account limit.** It means the usage API is throttling this machine's polling — it says nothing about the account's quota and never triggers a switch. When the daemon receives a 429, it records a per-provider backoff deadline in `~/.oauth-switch/state.json` (the `retry-after` header, capped at 1 hour; 15 minutes when the header is missing) and makes zero usage requests for that provider until the deadline passes.
+**HTTP 429 from the usage API is endpoint throttling, not an account limit.** It means the usage API is throttling this machine's polling — it says nothing about the account's quota and never triggers a switch. When a 429 is received, a per-provider backoff deadline is recorded in `~/.oauth-switch/state.json` and zero usage requests are made for that provider until the deadline passes. The backoff is exponential on consecutive 429s — **15 min → 30 min → 60 min (capped at 1 hour)** — and when the response carries a `retry-after` longer than the computed backoff, the longer value wins (still capped at 1 hour). A successful usage fetch resets the streak.
+
+The same backoff gate applies to the manual usage commands (`oas usage`, `cc-switch usage`, `oas codex sync-usage`) and the account listing: while the deadline is active they make zero usage-API requests and render the cached snapshots, printing `Usage API throttled, showing cached data, next attempt at <time>`. Add `--force` to bypass the gate — a genuinely manual escape hatch; a forced request that hits a 429 records the next (doubled) deadline. The menu bar app's timer-driven refresh never passes `--force`.
 
 Both Claude Code and Codex use the same quota-aware target selection: before picking a target, the daemon refreshes usage snapshots and persists them, then picks the viable account with the lowest combined usage (5h weighted 60%, 7d weighted 40%). To keep polling volume low, the **current** account is refreshed every cycle, while **non-current** accounts are only refetched when their snapshot is missing or older than 30 minutes (deduped per credential, so org variants of the same login are fetched once); fully disabled accounts are never polled. A snapshot older than 2 hours is treated as stale and never counts as viable — stale or unknown accounts are only used as a last resort when the current account is rate-limited.
 
@@ -180,6 +192,7 @@ open /Applications/OAuthSwitch.app
 
 Features:
 - Live usage display for Claude/Codex/Windsurf, with menu bar balance display for the selected provider
+- Background refresh defaults to 15 minutes (configurable in Settings); usage requests honor the 429 backoff gate and the app never bypasses it with `--force`
 - Monochrome provider icons in the menu bar and provider panels
 - Expandable provider panels so large account sets stay accessible in the menu bar window
 - One-click account switching
