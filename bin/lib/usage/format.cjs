@@ -1,3 +1,7 @@
+const {
+  getClaudeAccountGroups,
+} = require('../store/accounts.cjs');
+
 function formatUsageInfo(usage) {
   const lines = [];
   if (usage.rate_limited) {
@@ -73,26 +77,28 @@ function shouldKeepExistingSnapshot(existingSnapshot, nextSnapshot, isCurrentAcc
 async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage) {
   let currentUsage = null;
   let changed = false;
-  for (const entry of store.accounts) {
-    const accessToken = entry.credentials?.claudeAiOauth?.accessToken;
+  for (const group of getClaudeAccountGroups(store)) {
+    const representative = group.entries.find(({ entry }) => entry?.credentials?.claudeAiOauth?.accessToken)?.entry
+      || group.entries[0]?.entry;
+    const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
     try {
       const usage = await fetchUsage(accessToken);
-      if (entry.key === currentKey) {
+      const groupHasCurrent = group.entries.some(({ entry }) => entry.key === currentKey);
+      if (groupHasCurrent) {
         currentUsage = usage;
       }
       const nextSnapshot = toUsageSnapshot(usage);
       if (!nextSnapshot) continue;
-      const idx = store.accounts.findIndex((e) => e.key === entry.key);
-      if (idx >= 0) {
-        if (shouldKeepExistingSnapshot(store.accounts[idx].usageSnapshot, nextSnapshot, entry.key === currentKey)) {
-          continue;
-        }
+      if (shouldKeepExistingSnapshot(representative.usageSnapshot, nextSnapshot, groupHasCurrent)) {
+        continue;
+      }
 
-        const before = JSON.stringify(store.accounts[idx].usageSnapshot || null);
+      for (const { index } of group.entries) {
+        const before = JSON.stringify(store.accounts[index].usageSnapshot || null);
         const after = JSON.stringify(nextSnapshot);
         if (before !== after) {
-          store.accounts[idx].usageSnapshot = nextSnapshot;
+          store.accounts[index].usageSnapshot = nextSnapshot;
           changed = true;
         }
       }

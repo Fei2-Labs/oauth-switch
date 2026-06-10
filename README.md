@@ -70,6 +70,10 @@ oas work
 # Set alias for Claude Code account
 oas alias 0 work
 
+# Disable a Claude Code account so auto-switch skips it (enable to undo)
+oas disable 2
+oas enable 2
+
 # List Kiro accounts
 oas kiro
 
@@ -83,12 +87,19 @@ oas kiro alias 0 personal
 # List Codex accounts
 oas codex
 
+# Add a managed Codex account in an isolated CODEX_HOME
+oas codex add
+
 # Switch Codex account by index or alias
 oas codex 1
 oas codex personal
 
 # Set alias for Codex account
 oas codex alias 0 personal
+
+# Disable a Codex account so auto-switch skips it (enable to undo)
+oas codex disable 1
+oas codex enable 1
 
 # Show Windsurf quota from the local Windsurf state database
 oas windsurf
@@ -100,7 +111,7 @@ oas auto
 oas sync
 ```
 
-Accounts are captured automatically — just log in with different accounts and run `oas` (or `oas kiro` / `oas codex`) each time. Use `oas alias`, `oas kiro alias`, or `oas codex alias` to give accounts memorable names.
+Accounts are captured automatically from local OAuth token files, oauth-switch backup snapshots, and managed Codex homes. Log in with different accounts and run `oas` (or `oas kiro` / `oas codex`) each time. For Codex, run `oas codex add` to create an isolated managed `CODEX_HOME` and keep that account available without replacing the global `~/.codex/auth.json`. Use `oas alias`, `oas kiro alias`, or `oas codex alias` to give accounts memorable names.
 
 ---
 
@@ -114,6 +125,8 @@ The auto-switch daemon checks usage every 5 minutes and switches to the account 
 | 7d utilization | ≥ 90% | < 80% |
 
 If all accounts are exhausted, it notifies without switching — unless the current account is fully rate-limited (429), in which case it picks the least-bad option.
+
+Disabled accounts (`oas disable <index>` / `oas codex disable <index>`, or the Disable button in the menu bar app) are never picked as auto-switch targets. Manual switching to a disabled account still works; use `enable` to make it an auto-switch candidate again.
 
 ### Install the daemon
 
@@ -147,7 +160,9 @@ open /Applications/OAuthSwitch.app
 Features:
 - Live usage display for Claude/Codex/Windsurf, with menu bar balance display for the selected provider
 - Monochrome provider icons in the menu bar and provider panels
+- Expandable provider panels so large account sets stay accessible in the menu bar window
 - One-click account switching
+- Managed Codex account login from Settings
 - Manual refresh from the menu bar
 - Menu bar warning threshold and balance source configuration in Settings
 
@@ -174,7 +189,11 @@ Features:
 
 `oauth-switch` snapshots each account's credentials when you use it. Switching replaces the live config files with the stored snapshot and refreshes the token. Restart the CLI/IDE for changes to take effect.
 
-Claude accounts that share the same OAuth access/refresh token pair are collapsed into a single quota entry in the CLI and menu bar app, even if their metadata or `accountUuid` differs.
+Claude and Codex accounts are keyed by account plus workspace/organization scope. The same login in different workspaces is shown as separate quota entries. Codex expands all organizations embedded in the local OAuth token so one stored login can display multiple workspace rows. Codex auto-detection reads the current `~/.codex/auth.json`, saved oauth-switch snapshots, oauth-switch auth backups, and managed homes under `~/.OAuthSwitch/codex-homes`. Duplicate snapshots with the same OAuth access/refresh token pair in the same workspace/organization are collapsed into one quota entry in the CLI and menu bar app, even if their metadata or account ID differs.
+
+### Managed Codex accounts
+
+`oas codex add` starts `codex login --device-auth` with an isolated `CODEX_HOME` under `~/.OAuthSwitch/codex-homes/<uuid>`. After login, oauth-switch stores that auth snapshot in `~/.CodexMultiAccounts.json`, displays all workspaces embedded in the token, and keeps the managed home available for future refreshes. The macOS Settings window exposes the same flow through **Add Codex Account**.
 
 ### Kiro account types
 

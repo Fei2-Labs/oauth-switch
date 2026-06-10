@@ -5,10 +5,12 @@ private enum MenuBarTheme {
     static let sectionSpacing: CGFloat = 10
     static let cardRadius: CGFloat = 14
     static let rowRadius: CGFloat = 10
+    static let windowWidth: CGFloat = 372
 }
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
+    @State private var expandedProviderIDs: Set<ProviderID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: MenuBarTheme.sectionSpacing) {
@@ -16,7 +18,7 @@ struct MenuBarView: View {
             providerSections
             footerSection
         }
-        .frame(width: 372)
+        .frame(width: MenuBarTheme.windowWidth)
         .padding(MenuBarTheme.outerPadding)
         .background(
             LinearGradient(
@@ -63,13 +65,27 @@ struct MenuBarView: View {
     private var providerSections: some View {
         VStack(alignment: .leading, spacing: MenuBarTheme.sectionSpacing) {
             ForEach(appState.providerSections) { section in
-                ProviderSectionView(section: section) { action in
-                    appState.perform(action)
-                }
+                ProviderSectionView(
+                    section: section,
+                    isExpanded: expandedProviderIDs.contains(section.id),
+                    onToggleExpanded: {
+                        toggleProvider(section.id)
+                    },
+                    onAction: { action in
+                        appState.perform(action)
+                    }
+                )
             }
         }
     }
 
+    private func toggleProvider(_ providerID: ProviderID) {
+        if expandedProviderIDs.contains(providerID) {
+            expandedProviderIDs.remove(providerID)
+        } else {
+            expandedProviderIDs.insert(providerID)
+        }
+    }
     private var footerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let msg = appState.lastSwitchMessage, !msg.isEmpty {
@@ -107,35 +123,49 @@ struct MenuBarView: View {
 
 struct ProviderSectionView: View {
     let section: ProviderSectionSnapshot
+    let isExpanded: Bool
+    let onToggleExpanded: () -> Void
     let onAction: (ProviderRowAction) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                HStack(spacing: 8) {
-                    ProviderIconView(provider: section.id, size: 18, cornerRadius: 5, tint: .white.opacity(0.92))
-                    Text(section.title)
-                        .font(.system(size: 13, weight: .semibold))
+            Button {
+                onToggleExpanded()
+            } label: {
+                HStack {
+                    HStack(spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 10)
+                        ProviderIconView(provider: section.id, size: 18, cornerRadius: 5, tint: .white.opacity(0.92))
+                        Text(section.title)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    Spacer()
+                    if section.isLoading {
+                        StatusPill(title: "Loading", tone: .neutral)
+                    } else if !section.rows.isEmpty {
+                        Text("\(section.rows.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Spacer()
-                if section.isLoading {
-                    StatusPill(title: "Loading", tone: .neutral)
-                } else if !section.rows.isEmpty {
-                    Text("\(section.rows.count)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            Group {
-                if section.isLoading {
-                    EmptySectionState(text: "Refreshing local state…")
-                } else if section.rows.isEmpty {
-                    EmptySectionState(text: section.emptyMessage)
-                } else {
-                    VStack(spacing: 6) {
-                        ForEach(section.rows) { row in
-                            ProviderRowView(row: row, onAction: onAction)
+            if isExpanded {
+                Group {
+                    if section.isLoading {
+                        EmptySectionState(text: "Refreshing local state…")
+                    } else if section.rows.isEmpty {
+                        EmptySectionState(text: section.emptyMessage)
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(section.rows) { row in
+                                ProviderRowView(row: row, onAction: onAction)
+                            }
                         }
                     }
                 }
@@ -168,12 +198,14 @@ struct ProviderRowView: View {
                     Text(row.title)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
+                        .opacity(row.isDisabled ? 0.5 : 1)
 
                     if !row.secondaryTexts.isEmpty {
                         Text(row.secondaryTexts.joined(separator: " · "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .opacity(row.isDisabled ? 0.5 : 1)
                     }
 
                     Spacer(minLength: 8)
@@ -203,7 +235,7 @@ struct ProviderRowView: View {
                     }
                 }
 
-                if !row.metrics.isEmpty || row.action != nil {
+                if !row.metrics.isEmpty || row.action != nil || row.secondaryAction != nil {
                     HStack(alignment: .center, spacing: 8) {
                         if !row.metrics.isEmpty {
                             HStack(spacing: 6) {
@@ -211,9 +243,18 @@ struct ProviderRowView: View {
                                     MetricBadge(metric: metric)
                                 }
                             }
+                            .opacity(row.isDisabled ? 0.5 : 1)
                         }
 
                         Spacer(minLength: 8)
+
+                        if let secondaryAction = row.secondaryAction {
+                            Button(secondaryAction.title) {
+                                onAction(secondaryAction)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                        }
 
                         if let action = row.action {
                             Button(action.title) {

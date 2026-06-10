@@ -90,14 +90,17 @@ enum ProviderMetricStyle {
 
 enum ProviderRowAction {
     case switchClaude(key: String)
-    case switchCodex(index: Int)
+    case switchCodex(key: String)
     case switchKiro(index: Int)
+    case toggleDisabled(provider: ProviderID, key: String, disabled: Bool)
     case refresh
 
     var title: String {
         switch self {
         case .refresh:
             return "Refresh"
+        case let .toggleDisabled(_, _, disabled):
+            return disabled ? "Disable" : "Enable"
         default:
             return "Switch"
         }
@@ -121,7 +124,37 @@ struct ProviderRowSnapshot: Identifiable {
     let statusColorName: String?
     let metrics: [ProviderMetric]
     let isActive: Bool
+    let isDisabled: Bool
     let action: ProviderRowAction?
+    let secondaryAction: ProviderRowAction?
+
+    init(
+        id: String,
+        title: String,
+        secondaryTexts: [String],
+        detailText: String?,
+        detailLines: [String],
+        statusText: String?,
+        statusColorName: String?,
+        metrics: [ProviderMetric],
+        isActive: Bool,
+        isDisabled: Bool = false,
+        action: ProviderRowAction?,
+        secondaryAction: ProviderRowAction? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.secondaryTexts = secondaryTexts
+        self.detailText = detailText
+        self.detailLines = detailLines
+        self.statusText = statusText
+        self.statusColorName = statusColorName
+        self.metrics = metrics
+        self.isActive = isActive
+        self.isDisabled = isDisabled
+        self.action = action
+        self.secondaryAction = secondaryAction
+    }
 }
 
 struct ProviderSectionSnapshot: Identifiable {

@@ -36,6 +36,7 @@ const {
   syncStoreFromLive,
   findSelection,
   removeStoredAccount,
+  setStoredAccountDisabled,
 } = storeAccounts;
 
 const {
@@ -85,6 +86,9 @@ function parseArgs(argv) {
     usageOnly: false,
     removeOnly: false,
     removeIndex: null,
+    toggleDisabledOnly: false,
+    toggleDisabledValue: null,
+    toggleIndex: null,
     showUsage: settings.showUsage !== false,
     selector: '',
   };
@@ -128,6 +132,16 @@ function parseArgs(argv) {
       options.removeOnly = true;
       continue;
     }
+    if (current === '--disable' || current === 'disable') {
+      options.toggleDisabledOnly = true;
+      options.toggleDisabledValue = true;
+      continue;
+    }
+    if (current === '--enable' || current === 'enable') {
+      options.toggleDisabledOnly = true;
+      options.toggleDisabledValue = false;
+      continue;
+    }
     if (current === '--show-usage') {
       options.showUsage = true;
       const s = readSettings();
@@ -148,6 +162,13 @@ function parseArgs(argv) {
       const numeric = Number.parseInt(current, 10);
       if (!Number.isNaN(numeric) && String(numeric) === current) {
         options.removeIndex = numeric;
+        continue;
+      }
+    }
+    if (options.toggleDisabledOnly && options.toggleIndex === null) {
+      const numeric = Number.parseInt(current, 10);
+      if (!Number.isNaN(numeric) && String(numeric) === current) {
+        options.toggleIndex = numeric;
         continue;
       }
     }
@@ -222,9 +243,30 @@ async function main() {
       return;
     }
 
+    if (options.toggleDisabledOnly) {
+      if (options.toggleIndex === null) {
+        console.log(options.toggleDisabledValue ? 'Usage: disable <index>' : 'Usage: enable <index>');
+        process.exitCode = 1;
+        return;
+      }
+      const syncedToggle = syncStoreFromLive(existingStore, config, credentials, deepCopy, STORE_VERSION);
+      const storeToggle = syncedToggle.store;
+      const accountsToggle = getDisplayAccounts(storeToggle, config.oauthAccount, credentials);
+      const selectedToggle = findSelection(accountsToggle, String(options.toggleIndex));
+      const entry = setStoredAccountDisabled(storeToggle, selectedToggle.index, options.toggleDisabledValue);
+      writeStore(storeToggle, options);
+      const name = getPreferredDisplayNameUi(entry.metadata || {});
+      if (options.toggleDisabledValue) {
+        console.log(`Disabled [${selectedToggle.index}] ${name}. Auto-switch will skip this account.`);
+      } else {
+        console.log(`Enabled [${selectedToggle.index}] ${name}. Auto-switch can pick this account again.`);
+      }
+      return;
+    }
+
     const synced = syncStoreFromLive(existingStore, config, credentials, deepCopy, STORE_VERSION);
     const store = synced.store;
-    const accounts = getDisplayAccounts(store, config.oauthAccount);
+    const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
 
     if (!options.selector) {
       await runListAction({

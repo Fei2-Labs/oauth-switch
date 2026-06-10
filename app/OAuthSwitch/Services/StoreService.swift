@@ -42,29 +42,73 @@ struct StoreService {
         return store
     }
 
+    func setClaudeAccountDisabled(key: String, disabled: Bool) -> Bool {
+        let store = loadClaudeStore()
+        let indices = store.accounts.enumerated()
+            .filter { $0.element.key == key || $0.element.canonicalKey == key }
+            .map(\.offset)
+        return setAccountDisabled(storePath: claudeStorePath, accountIndices: indices, disabled: disabled)
+    }
+
+    func setCodexAccountDisabled(key: String, disabled: Bool) -> Bool {
+        let store = loadCodexStore()
+        let indices = store.accounts.enumerated()
+            .filter { entry in
+                entry.element.key == key
+                    || entry.element.canonicalKey == key
+                    || entry.element.workspaceVariants.contains { $0.key == key }
+            }
+            .map(\.offset)
+        return setAccountDisabled(storePath: codexStorePath, accountIndices: indices, disabled: disabled)
+    }
+
+    private func setAccountDisabled(storePath: String, accountIndices: [Int], disabled: Bool) -> Bool {
+        guard !accountIndices.isEmpty,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: storePath)),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var accounts = root["accounts"] as? [[String: Any]] else {
+            return false
+        }
+
+        for index in accountIndices where accounts.indices.contains(index) {
+            if disabled {
+                accounts[index]["disabled"] = true
+            } else {
+                accounts[index].removeValue(forKey: "disabled")
+            }
+        }
+
+        root["accounts"] = accounts
+        root["updatedAt"] = ISO8601DateFormatter().string(from: Date())
+
+        guard let output = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) else {
+            return false
+        }
+        return (try? output.write(to: URL(fileURLWithPath: storePath), options: .atomic)) != nil
+    }
+
     func detectActiveClaudeKey() -> String? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: claudeConfigPath)),
               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = config["oauthAccount"] as? [String: Any] else {
             return nil
         }
-        if let uuid = oauth["accountUuid"] as? String, !uuid.isEmpty {
-            return "uuid:\(uuid.lowercased())"
-        }
-        if let email = oauth["emailAddress"] as? String, !email.isEmpty {
-            return "email:\(email.lowercased())"
-        }
-        return nil
+        return ClaudeAccount.makeCanonicalKey(
+            accountUuid: oauth["accountUuid"] as? String,
+            emailAddress: oauth["emailAddress"] as? String,
+            organizationUuid: oauth["organizationUuid"] as? String,
+            organizationId: oauth["organizationId"] as? String,
+            workspaceUuid: oauth["workspaceUuid"] as? String,
+            workspaceId: oauth["workspaceId"] as? String
+        )
     }
 
     func detectActiveCodexKey() -> String? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: codexAuthPath)),
-              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = auth["tokens"] as? [String: Any],
-              let accountId = tokens["account_id"] as? String else {
+              let auth = try? JSONDecoder().decode(CodexAuth.self, from: data) else {
             return nil
         }
-        return "account:\(accountId)"
+        return CodexAccount.makeCanonicalKey(auth: auth)
     }
 
     func loadKiroStore() -> KiroStore {

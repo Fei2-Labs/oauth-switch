@@ -4,6 +4,7 @@ import Combine
 class AppState: ObservableObject {
     private enum PreferenceKey {
         static let refreshIntervalSeconds = "settings.refreshIntervalSeconds"
+        static let autoSyncClaudeUsage = "settings.autoSyncClaudeUsage"
         static let autoSyncCodexUsage = "settings.autoSyncCodexUsage"
         static let autoSyncKiroAccounts = "settings.autoSyncKiroAccounts"
         static let autoRefreshExpiredKiro = "settings.autoRefreshExpiredKiro"
@@ -29,6 +30,11 @@ class AppState: ObservableObject {
         didSet {
             UserDefaults.standard.set(refreshIntervalSeconds, forKey: PreferenceKey.refreshIntervalSeconds)
             startPolling()
+        }
+    }
+    @Published var autoSyncClaudeUsage: Bool = UserDefaults.standard.object(forKey: PreferenceKey.autoSyncClaudeUsage) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoSyncClaudeUsage, forKey: PreferenceKey.autoSyncClaudeUsage)
         }
     }
     @Published var autoSyncCodexUsage: Bool = UserDefaults.standard.object(forKey: PreferenceKey.autoSyncCodexUsage) as? Bool ?? true {
@@ -63,6 +69,7 @@ class AppState: ObservableObject {
     }
 
     private var timer: Timer?
+    private var codexLoginPollingTimer: Timer?
     private var windsurfLoadGeneration = 0
     private let storeService = StoreService()
     private let switchService = SwitchService()
@@ -78,7 +85,7 @@ class AppState: ObservableObject {
 
     var menuBarIcon: String {
         let claudeHigh = claudeAccounts
-            .first { $0.key == activeClaudeKey }
+            .first { $0.matchesActiveKey(activeClaudeKey) }
             .map { $0.fiveHourUsed >= trigger5h || $0.sevenDayUsed >= trigger7d } ?? false
         return claudeHigh ? "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90" : "arrow.trianglehead.2.clockwise.rotate.90"
     }
@@ -104,9 +111,9 @@ class AppState: ObservableObject {
         case .off:
             return nil
         case .claude:
-            percent = claudeAccounts.first(where: { $0.key == activeClaudeKey })?.lowestRemainingPercent
+            percent = claudeAccounts.first(where: { $0.matchesActiveKey(activeClaudeKey) })?.lowestRemainingPercent
         case .codex:
-            percent = codexAccounts.first(where: { $0.key == activeCodexKey })?.lowestRemainingPercent
+            percent = codexAccounts.first(where: { $0.matchesActiveKey(activeCodexKey) })?.lowestRemainingPercent
         case .windsurf:
             percent = windsurfAccounts.first(where: { $0.key == activeWindsurfKey })?.lowestRemainingPercent
         }
@@ -141,18 +148,22 @@ class AppState: ObservableObject {
     }
 
     func switchClaude(to account: ClaudeAccount) {
-        let index = account.key.contains("uuid:")
-            ? (claudeAccounts.firstIndex(where: { $0.key == account.key }) ?? 0)
-            : (claudeAccounts.firstIndex(where: { $0.key == account.key }) ?? 0)
+        let index = claudeAccounts.firstIndex(where: { $0.id == account.id }) ?? 0
         runSwitch(args: [String(index)])
     }
 
-    func switchCodex(to index: Int) {
-        runSwitch(args: ["codex", String(index)])
+    func switchCodex(to account: CodexAccount) {
+        runSwitch(args: ["codex", account.key])
     }
 
     func switchKiro(to index: Int) {
         runSwitch(args: ["kiro", String(index)])
+    }
+
+    func addManagedCodexAccount() {
+        let result = switchService.openCodexManagedLogin()
+        lastSwitchMessage = result
+        startCodexLoginPolling()
     }
 
     func perform(_ action: ProviderRowAction) {
@@ -160,12 +171,40 @@ class AppState: ObservableObject {
         case let .switchClaude(key):
             guard let account = claudeAccounts.first(where: { $0.key == key }) else { return }
             switchClaude(to: account)
-        case let .switchCodex(index):
-            switchCodex(to: index)
+        case let .switchCodex(key):
+            guard let account = codexAccounts.first(where: { $0.key == key }) else { return }
+            switchCodex(to: account)
         case let .switchKiro(index):
             switchKiro(to: index)
+        case let .toggleDisabled(provider, key, disabled):
+            setAccountDisabled(provider: provider, key: key, disabled: disabled)
         case .refresh:
             loadAll()
+        }
+    }
+
+    private func setAccountDisabled(provider: ProviderID, key: String, disabled: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let changed: Bool
+            switch provider {
+            case .claude:
+                changed = self.storeService.setClaudeAccountDisabled(key: key, disabled: disabled)
+            case .codex:
+                changed = self.storeService.setCodexAccountDisabled(key: key, disabled: disabled)
+            default:
+                changed = false
+            }
+            DispatchQueue.main.async {
+                if changed {
+                    self.lastSwitchMessage = disabled
+                        ? "Disabled account. Auto-switch will skip it."
+                        : "Enabled account. Auto-switch can pick it again."
+                } else {
+                    self.lastSwitchMessage = "Could not update the stored account."
+                }
+                self.loadAll()
+            }
         }
     }
 
@@ -174,6 +213,24 @@ class AppState: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(refreshIntervalSeconds), repeats: true) { [weak self] _ in
             self?.loadAll()
         }
+    }
+
+    private func startCodexLoginPolling() {
+        codexLoginPollingTimer?.invalidate()
+        var remainingTicks = 24
+        codexLoginPollingTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            remainingTicks -= 1
+            self.loadCodex()
+            if remainingTicks <= 0 {
+                timer.invalidate()
+                self.codexLoginPollingTimer = nil
+            }
+        }
+        loadCodex()
     }
 
     var refreshIntervalLabel: String {
@@ -192,7 +249,7 @@ class AppState: ObservableObject {
     }
 
     private func buildClaudeSection() -> ProviderSectionSnapshot {
-        let accounts = showInactiveAccounts ? claudeAccounts : claudeAccounts.filter { $0.key == activeClaudeKey }
+        let accounts = showInactiveAccounts ? claudeAccounts : claudeAccounts.filter { $0.matchesActiveKey(activeClaudeKey) }
         return ProviderSectionSnapshot(
             id: .claude,
             rows: accounts.map { account in
@@ -202,14 +259,16 @@ class AppState: ObservableObject {
                     secondaryTexts: [account.metadata?.planType].compactMap { $0 },
                     detailText: showResetTimes ? account.resetSummary : nil,
                     detailLines: [],
-                    statusText: nil,
+                    statusText: account.isDisabled ? "Disabled" : nil,
                     statusColorName: nil,
                     metrics: [
                         ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization),
                         ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization),
                     ],
-                    isActive: account.key == activeClaudeKey,
-                    action: account.key == activeClaudeKey ? nil : .switchClaude(key: account.key)
+                    isActive: account.matchesActiveKey(activeClaudeKey),
+                    isDisabled: account.isDisabled,
+                    action: account.matchesActiveKey(activeClaudeKey) ? nil : .switchClaude(key: account.key),
+                    secondaryAction: .toggleDisabled(provider: .claude, key: account.key, disabled: !account.isDisabled)
                 )
             },
             emptyMessage: "No accounts",
@@ -218,18 +277,18 @@ class AppState: ObservableObject {
     }
 
     private func buildCodexSection() -> ProviderSectionSnapshot {
-        let accounts = showInactiveAccounts ? codexAccounts : codexAccounts.filter { $0.key == activeCodexKey }
         return ProviderSectionSnapshot(
             id: .codex,
-            rows: accounts.enumerated().map { offset, account in
-                let index = codexAccounts.firstIndex(where: { $0.id == account.id }) ?? offset
+            rows: codexAccounts.map { account in
                 return ProviderRowSnapshot(
                     id: account.id,
                     title: account.label,
                     secondaryTexts: [],
                     detailText: showResetTimes ? account.resetSummary : nil,
-                    detailLines: [],
-                    statusText: nil,
+                    detailLines: account.switchable == false
+                        ? ["Auto-detected workspace from saved Codex token"]
+                        : [],
+                    statusText: account.isDisabled ? "Disabled" : nil,
                     statusColorName: nil,
                     metrics: [
                         account.fiveHourUsed.map {
@@ -239,11 +298,13 @@ class AppState: ObservableObject {
                             ProviderMetric(id: "\(account.id)-7d", label: "7d", value: $0, style: .utilization)
                         },
                     ].compactMap { $0 },
-                    isActive: account.key == activeCodexKey,
-                    action: account.key == activeCodexKey ? nil : .switchCodex(index: index)
+                    isActive: account.matchesActiveKey(activeCodexKey),
+                    isDisabled: account.isDisabled,
+                    action: account.matchesActiveKey(activeCodexKey) || account.switchable == false ? nil : .switchCodex(key: account.key),
+                    secondaryAction: .toggleDisabled(provider: .codex, key: account.key, disabled: !account.isDisabled)
                 )
             },
-            emptyMessage: "No accounts",
+            emptyMessage: "No saved Codex token. Run codex login, then refresh.",
             isLoading: loadingProviders.contains(.codex)
         )
     }
@@ -306,6 +367,9 @@ class AppState: ObservableObject {
     private func loadClaude() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            if self.autoSyncClaudeUsage {
+                _ = self.switchService.run(args: ["usage"])
+            }
             let store = self.storeService.loadClaudeStore()
             let activeKey = self.storeService.detectActiveClaudeKey()
             let deduplicatedAccounts = Self.deduplicatedClaudeAccounts(store.accounts, preferredKey: activeKey)
@@ -325,8 +389,10 @@ class AppState: ObservableObject {
             }
             let store = self.storeService.loadCodexStore()
             let activeKey = self.storeService.detectActiveCodexKey()
+            let expandedAccounts = store.accounts.flatMap { $0.workspaceVariants }
+            let deduplicatedAccounts = Self.deduplicatedCodexAccounts(expandedAccounts, preferredKey: activeKey)
             DispatchQueue.main.async {
-                self.codexAccounts = store.accounts
+                self.codexAccounts = deduplicatedAccounts
                 self.activeCodexKey = activeKey
                 self.finishLoading(.codex)
             }
@@ -388,7 +454,7 @@ private extension AppState {
         var groupOrder: [String] = []
 
         for account in accounts {
-            let groupKey = account.credentialFingerprint ?? "key:\(account.key)"
+            let groupKey = account.credentialFingerprint.map { "\($0):\(account.scopeKey)" } ?? "key:\(account.canonicalKey)"
             if groupedAccounts[groupKey] == nil {
                 groupOrder.append(groupKey)
                 groupedAccounts[groupKey] = []
@@ -400,10 +466,48 @@ private extension AppState {
             guard let group = groupedAccounts[groupKey], let first = group.first else {
                 return nil
             }
-            if let preferredKey, let preferred = group.first(where: { $0.key == preferredKey }) {
+            if let preferredKey, let preferred = group.first(where: { $0.matchesActiveKey(preferredKey) }) {
                 return preferred
             }
             return first
         }
+    }
+
+    static func deduplicatedCodexAccounts(_ accounts: [CodexAccount], preferredKey: String?) -> [CodexAccount] {
+        var groupedAccounts: [String: [CodexAccount]] = [:]
+        var groupOrder: [String] = []
+
+        for account in accounts {
+            let groupKey = account.credentialFingerprint.map { "\($0):\(account.scopeKey)" } ?? "key:\(account.canonicalKey)"
+            if groupedAccounts[groupKey] == nil {
+                groupOrder.append(groupKey)
+                groupedAccounts[groupKey] = []
+            }
+            groupedAccounts[groupKey, default: []].append(account)
+        }
+
+        return groupOrder.compactMap { groupKey in
+            guard let group = groupedAccounts[groupKey], let first = group.first else {
+                return nil
+            }
+            if let preferredKey, let preferred = group.first(where: { $0.matchesActiveKey(preferredKey) }) {
+                return preferred
+            }
+            return first
+        }
+    }
+}
+
+private extension ClaudeAccount {
+    func matchesActiveKey(_ activeKey: String?) -> Bool {
+        guard let activeKey else { return false }
+        return key == activeKey || canonicalKey == activeKey
+    }
+}
+
+private extension CodexAccount {
+    func matchesActiveKey(_ activeKey: String?) -> Bool {
+        guard let activeKey else { return false }
+        return key == activeKey || canonicalKey == activeKey
     }
 }

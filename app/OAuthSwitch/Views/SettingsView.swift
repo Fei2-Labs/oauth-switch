@@ -19,9 +19,20 @@ struct SettingsView: View {
             }
 
             Section("Automation") {
+                Toggle("Sync Claude usage on refresh", isOn: $appState.autoSyncClaudeUsage)
                 Toggle("Sync Codex usage on refresh", isOn: $appState.autoSyncCodexUsage)
                 Toggle("Sync Kiro accounts from local SSO cache", isOn: $appState.autoSyncKiroAccounts)
                 Toggle("Auto-refresh expired Kiro accounts", isOn: $appState.autoRefreshExpiredKiro)
+            }
+
+            Section("Codex Accounts") {
+                Button("Add Codex Account") {
+                    appState.addManagedCodexAccount()
+                }
+
+                Text("Opens a separate Codex login in Terminal and stores it under ~/.OAuthSwitch/codex-homes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Display") {
@@ -82,6 +93,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 470)
+        .frame(width: 460, height: 540)
     }
 }

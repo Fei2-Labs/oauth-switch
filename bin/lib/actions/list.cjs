@@ -50,7 +50,7 @@ async function runListAction(context) {
   }
 
   console.log(getAvailableAccountsHeading());
-  for (const line of formatAccountSummary(getDisplayAccounts(store, config.oauthAccount))) {
+  for (const line of formatAccountSummary(getDisplayAccounts(store, config.oauthAccount, credentials))) {
     console.log(line);
   }
   console.log('');

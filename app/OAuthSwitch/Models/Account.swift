@@ -30,11 +30,36 @@ struct ClaudeAccount: Codable, Identifiable {
     let capturedAt: String?
     let lastUsedAt: String?
     let usageSnapshot: UsageSnapshot?
+    let disabled: Bool?
 
     var id: String { key }
 
+    var isDisabled: Bool {
+        disabled == true
+    }
+
     var credentialFingerprint: String? {
         credentials?.claudeAiOauth?.fingerprint
+    }
+
+    var canonicalKey: String {
+        ClaudeAccount.makeCanonicalKey(
+            accountUuid: metadata?.accountUuid,
+            emailAddress: metadata?.emailAddress,
+            organizationUuid: metadata?.organizationUuid,
+            organizationId: metadata?.organizationId,
+            workspaceUuid: metadata?.workspaceUuid,
+            workspaceId: metadata?.workspaceId
+        ) ?? key
+    }
+
+    var scopeKey: String {
+        ClaudeAccount.makeScopeKey(
+            organizationUuid: metadata?.organizationUuid,
+            organizationId: metadata?.organizationId,
+            workspaceUuid: metadata?.workspaceUuid,
+            workspaceId: metadata?.workspaceId
+        ) ?? "scope:none"
     }
 
     var displayName: String {
@@ -70,7 +95,11 @@ struct ClaudeAccount: Codable, Identifiable {
 struct ClaudeMetadata: Codable {
     let emailAddress: String?
     let accountUuid: String?
+    let organizationUuid: String?
+    let organizationId: String?
     let organizationName: String?
+    let workspaceUuid: String?
+    let workspaceId: String?
     let planType: String?
 }
 
@@ -96,6 +125,58 @@ struct ClaudeOAuthCredentials: Codable {
     }
 }
 
+extension ClaudeAccount {
+    static func makeCanonicalKey(
+        accountUuid: String?,
+        emailAddress: String?,
+        organizationUuid: String?,
+        organizationId: String?,
+        workspaceUuid: String?,
+        workspaceId: String?
+    ) -> String? {
+        let baseKey: String?
+        if let accountUuid = normalized(accountUuid) {
+            baseKey = "uuid:\(accountUuid)"
+        } else if let emailAddress = normalized(emailAddress) {
+            baseKey = "email:\(emailAddress)"
+        } else {
+            baseKey = nil
+        }
+
+        guard let baseKey else { return nil }
+        guard let scope = makeScopeKey(
+            organizationUuid: organizationUuid,
+            organizationId: organizationId,
+            workspaceUuid: workspaceUuid,
+            workspaceId: workspaceId
+        ) else {
+            return baseKey
+        }
+        return "\(baseKey):\(scope)"
+    }
+
+    static func makeScopeKey(
+        organizationUuid: String?,
+        organizationId: String?,
+        workspaceUuid: String?,
+        workspaceId: String?
+    ) -> String? {
+        if let workspaceUuid = normalized(workspaceUuid ?? workspaceId) {
+            return "workspace:\(workspaceUuid)"
+        }
+        if let organizationUuid = normalized(organizationUuid ?? organizationId) {
+            return "org:\(organizationUuid)"
+        }
+        return nil
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 struct ClaudeStore: Codable {
     let version: String?
     var accounts: [ClaudeAccount]
@@ -110,11 +191,35 @@ struct CodexAccount: Codable, Identifiable {
     let capturedAt: String?
     let lastUsedAt: String?
     let usageSnapshot: UsageSnapshot?
+    let workspaceId: String?
+    let workspaceTitle: String?
+    let switchable: Bool?
+    let disabled: Bool?
 
     var id: String { key }
 
+    var isDisabled: Bool {
+        disabled == true
+    }
+
     var label: String {
-        displayName ?? key
+        guard let workspaceTitle, !workspaceTitle.isEmpty else {
+            return displayName ?? key
+        }
+        let baseName = displayName ?? key
+        return "\(baseName) [\(workspaceTitle)]"
+    }
+
+    var credentialFingerprint: String? {
+        auth?.credentialFingerprint
+    }
+
+    var canonicalKey: String {
+        CodexAccount.makeCanonicalKey(auth: auth, workspaceId: workspaceId) ?? key
+    }
+
+    var scopeKey: String {
+        CodexAccount.makeScopeKey(auth: auth, workspaceId: workspaceId) ?? "scope:none"
     }
 
     var fiveHourUsed: Double? {
@@ -167,10 +272,24 @@ struct CodexAuth: Codable {
     let OPENAI_API_KEY: String?
     let auth_mode: String?
     let tokens: CodexTokens?
+
+    var credentialFingerprint: String? {
+        let normalizedAccessToken = tokens?.access_token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedIdToken = tokens?.id_token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalizedAccessToken.isEmpty || !normalizedIdToken.isEmpty else {
+            return nil
+        }
+        guard let data = try? JSONEncoder().encode([normalizedAccessToken, normalizedIdToken]),
+              let fingerprint = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return fingerprint
+    }
 }
 
 struct CodexTokens: Codable {
     let access_token: String?
+    let id_token: String?
     let account_id: String?
 }
 
@@ -178,6 +297,110 @@ struct CodexStore: Codable {
     let version: String?
     var accounts: [CodexAccount]
     let updatedAt: String?
+}
+
+extension CodexAccount {
+    static func makeCanonicalKey(auth: CodexAuth?, workspaceId: String? = nil) -> String? {
+        let info = decodeAuthInfo(auth: auth)
+        let baseKey: String?
+        if let accountId = normalized(auth?.tokens?.account_id ?? info.accountId) {
+            baseKey = "account:\(accountId)"
+        } else if let email = normalized(info.email) {
+            baseKey = "email:\(email)"
+        } else if let apiKey = auth?.OPENAI_API_KEY, !apiKey.isEmpty {
+            return "key:\(String(apiKey.prefix(12)))"
+        } else {
+            baseKey = nil
+        }
+
+        guard let baseKey else { return nil }
+        guard let scope = makeScopeKey(auth: auth, workspaceId: workspaceId) else { return baseKey }
+        return "\(baseKey):\(scope)"
+    }
+
+    static func makeScopeKey(auth: CodexAuth?, workspaceId: String? = nil) -> String? {
+        if let workspaceId = normalized(workspaceId) {
+            return "org:\(workspaceId)"
+        }
+        let info = decodeAuthInfo(auth: auth)
+        guard let orgId = normalized(info.defaultOrgId) else { return nil }
+        return "org:\(orgId)"
+    }
+
+    var workspaceVariants: [CodexAccount] {
+        let workspaces = Self.decodeWorkspaces(auth: auth)
+        guard !workspaces.isEmpty else { return [self] }
+        return workspaces.map { workspace in
+            let scopedKey = Self.makeCanonicalKey(auth: auth, workspaceId: workspace.id) ?? key
+            return CodexAccount(
+                key: scopedKey,
+                auth: auth,
+                displayName: displayName,
+                capturedAt: capturedAt,
+                lastUsedAt: lastUsedAt,
+                usageSnapshot: usageSnapshot,
+                workspaceId: workspace.id,
+                workspaceTitle: workspace.title,
+                switchable: workspace.isDefault,
+                disabled: disabled
+            )
+        }
+    }
+
+    private static func decodeWorkspaces(auth: CodexAuth?) -> [(id: String?, title: String?, isDefault: Bool)] {
+        guard let token = auth?.tokens?.id_token ?? auth?.tokens?.access_token,
+              let payload = decodeJwtPayload(token),
+              let authInfo = payload["https://api.openai.com/auth"] as? [String: Any] else {
+            return []
+        }
+        let orgs = authInfo["organizations"] as? [[String: Any]] ?? []
+        return orgs.map { org in
+            (
+                org["id"] as? String,
+                org["title"] as? String,
+                (org["is_default"] as? Bool) == true
+            )
+        }
+    }
+
+    private static func decodeAuthInfo(auth: CodexAuth?) -> (email: String?, accountId: String?, defaultOrgId: String?) {
+        guard let token = auth?.tokens?.id_token ?? auth?.tokens?.access_token,
+              let payload = decodeJwtPayload(token),
+              let authInfo = payload["https://api.openai.com/auth"] as? [String: Any] else {
+            return (nil, nil, nil)
+        }
+
+        let orgs = authInfo["organizations"] as? [[String: Any]] ?? []
+        let defaultOrg = orgs.first(where: { ($0["is_default"] as? Bool) == true }) ?? orgs.first
+        return (
+            payload["email"] as? String,
+            authInfo["chatgpt_account_id"] as? String,
+            defaultOrg?["id"] as? String
+        )
+    }
+
+    private static func decodeJwtPayload(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = base64.count % 4
+        if padding > 0 {
+            base64 += String(repeating: "=", count: 4 - padding)
+        }
+        guard let data = Data(base64Encoded: base64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 // NOTE: Kiro account model

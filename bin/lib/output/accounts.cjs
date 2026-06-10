@@ -67,7 +67,8 @@ function formatAccountSummary(accounts, deps) {
     const plan = getCompactPlanLabel(entry);
     const lastUsed = formatRelativeTime(entry.lastUsedAt);
     const usageColumns = getUsageColumns(entry);
-    return `${marker} [${entry.index}] ${displayName} | ${plan} | ${usageColumns} | used:${lastUsed}`;
+    const disabledMarker = entry.disabled ? ' | disabled' : '';
+    return `${marker} [${entry.index}] ${displayName} | ${plan} | ${usageColumns} | used:${lastUsed}${disabledMarker}`;
   });
 }
 

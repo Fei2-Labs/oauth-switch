@@ -41,7 +41,7 @@ function isTargetViable(usageSnapshot) {
 
 function pickBestTarget(accounts, currentKey) {
   const candidates = accounts
-    .filter((a) => a.key !== currentKey && a.usageSnapshot)
+    .filter((a) => !a.current && a.key !== currentKey && a.usageSnapshot && !a.disabled)
     .map((a) => ({
       ...a,
       viable: isTargetViable(a.usageSnapshot),
@@ -145,6 +145,7 @@ async function runAutoSwitchClaude(context) {
 
 async function runAutoSwitchCodex(context) {
   const { readJson, writeJson, backupFile, AUTH_PATH, STORE_PATH, decodeJwtPayload } = context;
+  const { getCodexAccountKey, getDisplayCodexAccounts } = require('../providers/codex-identity.cjs');
 
   const auth = readJson(AUTH_PATH);
   if (!auth || !auth.tokens?.access_token) {
@@ -171,11 +172,11 @@ async function runAutoSwitchCodex(context) {
     return { switched: false };
   }
 
-  const currentAccountId = auth.tokens.account_id;
-  const currentKey = `account:${currentAccountId}`;
+  const currentKey = getCodexAccountKey(auth);
+  const accounts = getDisplayCodexAccounts(store, auth);
 
-  const candidates = store.accounts
-    .filter((a) => a.key !== currentKey)
+  const candidates = accounts
+    .filter((a) => !a.current && a.key !== currentKey && !a.disabled)
     .sort((a, b) => {
       const aScore = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
       const bScore = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
@@ -190,7 +191,9 @@ async function runAutoSwitchCodex(context) {
 
   const target = candidates[0];
   backupFile(AUTH_PATH);
-  target.lastUsedAt = new Date().toISOString();
+  if (typeof target.index === 'number' && store.accounts[target.index]) {
+    store.accounts[target.index].lastUsedAt = new Date().toISOString();
+  }
   store.updatedAt = new Date().toISOString();
   writeJson(STORE_PATH, store);
   writeJson(AUTH_PATH, target.auth);

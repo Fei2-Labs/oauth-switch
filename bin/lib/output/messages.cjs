@@ -2,6 +2,7 @@ function getListGuidance(usageCommand) {
   return [
     `Run ${usageCommand} <index> to make one of these stored entries the active Claude account.`,
     `Run ${usageCommand} --remove <index> to remove a stored account.`,
+    `Run ${usageCommand} --disable <index> to keep an account but skip it during auto-switch (--enable <index> to undo).`,
   ];
 }
 

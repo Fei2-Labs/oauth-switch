@@ -29,7 +29,7 @@ function runSwitchAction(context) {
   writeLiveState(nextConfig, nextCredentials, options);
   writeStore(store, options);
 
-  const currentAccounts = getDisplayAccounts(store, selected.metadata);
+  const currentAccounts = getDisplayAccounts(store, selected.metadata, selected.credentials);
   const currentPlan = inferPlanType(selected);
   console.log(`Switched active account to [${selected.index}] ${getPreferredDisplayName(selected.metadata)} <${selected.metadata.emailAddress}> (${currentPlan}).`);
   console.log('');

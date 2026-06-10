@@ -1,11 +1,62 @@
 function getAccountKey(account) {
+  const scope = getClaudeAccountScopeKey(account);
+  if (account?.accountUuid && String(account.accountUuid).trim()) {
+    return withScope(`uuid:${String(account.accountUuid).trim().toLowerCase()}`, scope);
+  }
+  if (account?.emailAddress && String(account.emailAddress).trim()) {
+    return withScope(`email:${String(account.emailAddress).trim().toLowerCase()}`, scope);
+  }
+  throw new Error('Account entry is missing both accountUuid and emailAddress.');
+}
+
+function getLegacyAccountKey(account) {
   if (account?.accountUuid && String(account.accountUuid).trim()) {
     return `uuid:${String(account.accountUuid).trim().toLowerCase()}`;
   }
   if (account?.emailAddress && String(account.emailAddress).trim()) {
     return `email:${String(account.emailAddress).trim().toLowerCase()}`;
   }
-  throw new Error('Account entry is missing both accountUuid and emailAddress.');
+  return null;
+}
+
+function withScope(baseKey, scope) {
+  return scope ? `${baseKey}:${scope}` : baseKey;
+}
+
+function getClaudeAccountScopeKey(account) {
+  const workspaceUuid = account?.workspaceUuid || account?.workspaceId;
+  if (workspaceUuid && String(workspaceUuid).trim()) {
+    return `workspace:${String(workspaceUuid).trim().toLowerCase()}`;
+  }
+
+  const organizationUuid = account?.organizationUuid || account?.organizationId;
+  if (organizationUuid && String(organizationUuid).trim()) {
+    return `org:${String(organizationUuid).trim().toLowerCase()}`;
+  }
+
+  return null;
+}
+
+function normalizeCredentialValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function getClaudeCredentialFingerprint(credentials) {
+  const claude = credentials?.claudeAiOauth;
+  if (!claude || typeof claude !== 'object') return null;
+
+  const accessToken = normalizeCredentialValue(claude.accessToken);
+  const refreshToken = normalizeCredentialValue(claude.refreshToken);
+  if (!accessToken && !refreshToken) return null;
+
+  return JSON.stringify([accessToken, refreshToken]);
+}
+
+function getClaudeAccountGroupKey(entry) {
+  const credential = getClaudeCredentialFingerprint(entry?.credentials);
+  const scope = getClaudeAccountScopeKey(entry?.metadata) || 'scope:none';
+  return credential ? `${credential}:${scope}` : `entry:${entry?.key}`;
 }
 
 function normalizeStore(store, storeVersion) {
@@ -17,13 +68,51 @@ function normalizeStore(store, storeVersion) {
   return normalized;
 }
 
-function getDisplayAccounts(store, currentMetadata) {
+function getClaudeAccountGroups(store) {
+  const groups = [];
+  const groupsByKey = new Map();
+
+  for (const [index, entry] of (store?.accounts || []).entries()) {
+    const groupKey = getClaudeAccountGroupKey(entry);
+    let group = groupsByKey.get(groupKey);
+    if (!group) {
+      group = { key: groupKey, entries: [] };
+      groupsByKey.set(groupKey, group);
+      groups.push(group);
+    }
+    group.entries.push({ entry, index });
+  }
+
+  return groups;
+}
+
+function getDisplayAccounts(store, currentMetadata, currentCredentials) {
   const currentKey = currentMetadata ? getAccountKey(currentMetadata) : null;
-  return store.accounts.map((entry, index) => ({
-    ...entry,
-    index,
-    current: currentKey && getAccountKey(entry.metadata) === currentKey,
-  }));
+  const currentCredentialKey = getClaudeCredentialFingerprint(currentCredentials);
+  const currentScope = getClaudeAccountScopeKey(currentMetadata) || 'scope:none';
+
+  return getClaudeAccountGroups(store).map((group) => {
+    const currentGroupEntry = currentCredentialKey
+      ? group.entries.find(({ entry }) => {
+          const credentialMatches = getClaudeCredentialFingerprint(entry.credentials) === currentCredentialKey;
+          const scopeMatches = (getClaudeAccountScopeKey(entry.metadata) || 'scope:none') === currentScope;
+          return credentialMatches && scopeMatches;
+        })
+      : null;
+    const preferredEntry = currentGroupEntry
+      || (currentKey ? group.entries.find(({ entry }) => getAccountKey(entry.metadata) === currentKey) : null)
+      || group.entries[0];
+    const current = currentCredentialKey
+      ? Boolean(currentGroupEntry)
+      : (currentKey ? getAccountKey(preferredEntry.entry.metadata) === currentKey : false);
+
+    return {
+      ...preferredEntry.entry,
+      index: preferredEntry.index,
+      current,
+      duplicateCount: group.entries.length,
+    };
+  });
 }
 
 function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
@@ -35,8 +124,10 @@ function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
   }
 
   const key = getAccountKey(config.oauthAccount);
+  const legacyKey = getLegacyAccountKey(config.oauthAccount);
   const now = new Date().toISOString();
-  const existingEntry = store.accounts?.find((e) => e.key === key);
+  const existingEntry = store.accounts?.find((e) => e.key === key)
+    || (legacyKey ? store.accounts?.find((e) => e.key === legacyKey) : null);
   const snapshot = {
     key,
     metadata: deepCopy(config.oauthAccount),
@@ -45,10 +136,14 @@ function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
     lastSyncedAt: now,
     lastUsedAt: existingEntry?.lastUsedAt || undefined,
     usageSnapshot: existingEntry?.usageSnapshot || undefined,
+    disabled: existingEntry?.disabled || undefined,
   };
 
   const nextStore = normalizeStore(deepCopy(store), storeVersion);
-  const existingIndex = nextStore.accounts.findIndex((entry) => entry.key === key);
+  let existingIndex = nextStore.accounts.findIndex((entry) => entry.key === key);
+  if (existingIndex < 0 && legacyKey) {
+    existingIndex = nextStore.accounts.findIndex((entry) => entry.key === legacyKey);
+  }
   if (existingIndex >= 0) {
     nextStore.accounts[existingIndex] = snapshot;
   } else {
@@ -90,11 +185,27 @@ function removeStoredAccount(store, removeIndex) {
   return removed;
 }
 
+function setStoredAccountDisabled(store, accountIndex, disabled) {
+  if (typeof accountIndex !== 'number' || accountIndex < 0 || accountIndex >= store.accounts.length) {
+    throw new Error(`Invalid account index. Use an index between 0 and ${store.accounts.length - 1}.`);
+  }
+  if (disabled) {
+    store.accounts[accountIndex].disabled = true;
+  } else {
+    delete store.accounts[accountIndex].disabled;
+  }
+  return store.accounts[accountIndex];
+}
+
 module.exports = {
   getAccountKey,
+  getClaudeCredentialFingerprint,
+  getClaudeAccountGroups,
+  getClaudeAccountScopeKey,
   normalizeStore,
   getDisplayAccounts,
   syncStoreFromLive,
   findSelection,
   removeStoredAccount,
+  setStoredAccountDisabled,
 };
