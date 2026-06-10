@@ -126,6 +126,10 @@ The auto-switch daemon checks usage every 5 minutes and switches to the account 
 
 If all accounts are exhausted, it notifies without switching — unless the current account is fully rate-limited (429), in which case it picks the least-bad option.
 
+Both Claude Code and Codex use the same quota-aware target selection: before picking a target, the daemon refreshes usage for **all** stored accounts (deduped per credential, so org variants of the same login are fetched once) and persists the snapshots, then picks the viable account with the lowest combined usage (5h weighted 60%, 7d weighted 40%). A snapshot older than 2 hours is treated as stale and never counts as viable — stale or unknown accounts are only used as a last resort when the current account is rate-limited.
+
+If a stored (non-active) Claude account's access token has expired, the daemon automatically refreshes it via the OAuth refresh token and retries the usage fetch, keeping the stored credentials up to date. The live `~/.claude` credentials of the active account are never touched by this refresh; if a refresh fails (e.g. the account was revoked), the previous snapshot is kept and the run continues.
+
 Disabled accounts (`oas disable <index>` / `oas codex disable <index>`, or the Disable button in the menu bar app) are never picked as auto-switch targets. Manual switching to a disabled account still works; use `enable` to make it an auto-switch candidate again.
 
 ### Install the daemon

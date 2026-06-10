@@ -1,7 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { fetchCodexUsage } = require('../actions/auto-switch.cjs');
+const { fetchCodexUsage, toCodexUsageSnapshot } = require('../actions/auto-switch.cjs');
 const {
   decodeJwtPayload,
   getCodexAccountKey,
@@ -185,7 +185,7 @@ async function syncUsage() {
     if (!accessToken) continue;
     try {
       const usage = await fetchCodexUsage(accessToken);
-      const snapshot = codexUsageSnapshot(usage, now);
+      const snapshot = toCodexUsageSnapshot(usage, now);
       store.accounts[idx].usageSnapshot = snapshot;
       synced += 1;
       if (account.key === currentKey) currentSynced = true;
@@ -199,20 +199,6 @@ async function syncUsage() {
   if (failed > 0) parts.push(`${failed} failed.`);
   if (!currentSynced && currentKey) parts.push('Current account was not refreshed.');
   console.log(parts.join(' '));
-}
-
-function codexUsageSnapshot(usage, fetchedAt = new Date().toISOString()) {
-  return {
-    five_hour: typeof usage.five_hour_percent === 'number' || usage.five_hour_reset ? {
-      utilization: usage.five_hour_percent,
-      resets_at: usage.five_hour_reset ?? null,
-    } : null,
-    seven_day: typeof usage.weekly_percent === 'number' || usage.weekly_reset ? {
-      utilization: usage.weekly_percent,
-      resets_at: usage.weekly_reset ?? null,
-    } : null,
-    fetchedAt,
-  };
 }
 
 async function addManagedCodexAccount() {
@@ -267,7 +253,7 @@ async function syncCurrentUsageOnly(auth, store, currentKey) {
 
   try {
     const usage = await fetchCodexUsage(auth.tokens.access_token);
-    store.accounts[idx].usageSnapshot = codexUsageSnapshot(usage);
+    store.accounts[idx].usageSnapshot = toCodexUsageSnapshot(usage);
     writeStore(store);
     console.log('Synced Codex usage.');
   } catch (error) {

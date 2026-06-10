@@ -74,7 +74,12 @@ function shouldKeepExistingSnapshot(existingSnapshot, nextSnapshot, isCurrentAcc
   return false;
 }
 
-async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage) {
+function isAuthFailure(err) {
+  return err?.statusCode === 401 || err?.statusCode === 403;
+}
+
+async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, options = {}) {
+  const refreshOAuthToken = options.refreshOAuthToken || require('./fetch.cjs').refreshOAuthToken;
   let currentUsage = null;
   let changed = false;
   for (const group of getClaudeAccountGroups(store)) {
@@ -83,7 +88,26 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage) {
     const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
     try {
-      const usage = await fetchUsage(accessToken);
+      let usage;
+      try {
+        usage = await fetchUsage(accessToken);
+      } catch (err) {
+        // Expired/invalid token: try an OAuth refresh and retry the fetch once.
+        // Only the STORE copies of the credentials are updated here — never
+        // the live ~/.claude credentials/Keychain.
+        const refreshTokenValue = representative?.credentials?.claudeAiOauth?.refreshToken;
+        if (!isAuthFailure(err) || !refreshTokenValue) throw err;
+        const refreshed = await refreshOAuthToken(refreshTokenValue);
+        for (const { index } of group.entries) {
+          const oauth = store.accounts[index]?.credentials?.claudeAiOauth;
+          if (!oauth) continue;
+          oauth.accessToken = refreshed.accessToken;
+          if (refreshed.refreshToken) oauth.refreshToken = refreshed.refreshToken;
+          if (refreshed.expiresAt) oauth.expiresAt = refreshed.expiresAt;
+          changed = true;
+        }
+        usage = await fetchUsage(refreshed.accessToken);
+      }
       const groupHasCurrent = group.entries.some(({ entry }) => entry.key === currentKey);
       if (groupHasCurrent) {
         currentUsage = usage;
@@ -103,7 +127,7 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage) {
         }
       }
     } catch {
-      // Keep previous snapshot on failure.
+      // Keep previous snapshot on failure (token may be revoked).
     }
   }
   return { currentUsage, changed };

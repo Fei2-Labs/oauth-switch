@@ -6,6 +6,9 @@
     "oauth-switch": "./bin/oauth-switch.cjs",
     "oas": "./bin/oauth-switch.cjs"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "bin/",
     "README.md",

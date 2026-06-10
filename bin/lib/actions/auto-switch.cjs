@@ -31,8 +31,21 @@ function shouldTrigger(usage) {
   return false;
 }
 
+// Snapshots older than this never count as "viable" — they may hide an
+// account that exhausted its quota since the last refresh. Stale-snapshot
+// accounts remain eligible only for the forced (rate-limited) path.
+const SNAPSHOT_FRESHNESS_MS = 2 * 60 * 60 * 1000;
+
+function isSnapshotFresh(usageSnapshot, now = Date.now()) {
+  if (!usageSnapshot || !usageSnapshot.fetchedAt) return false;
+  const fetched = new Date(usageSnapshot.fetchedAt).getTime();
+  if (Number.isNaN(fetched)) return false;
+  return now - fetched <= SNAPSHOT_FRESHNESS_MS;
+}
+
 function isTargetViable(usageSnapshot) {
   if (!usageSnapshot) return false;
+  if (!isSnapshotFresh(usageSnapshot)) return false;
   const fiveH = usageSnapshot.five_hour?.utilization;
   const sevenD = usageSnapshot.seven_day?.utilization;
   if (typeof fiveH !== 'number' || typeof sevenD !== 'number') return false;
@@ -62,6 +75,95 @@ function getScore(snapshot) {
   return fiveH * 0.6 + sevenD * 0.4;
 }
 
+function hasUsageData(snapshot) {
+  if (!snapshot) return false;
+  return typeof snapshot.five_hour?.utilization === 'number'
+    || typeof snapshot.seven_day?.utilization === 'number';
+}
+
+// Quota-aware Codex target picking, aligned with the Claude path:
+// 1. Viable (fresh snapshot, both windows under targets) → lowest score.
+// 2. No viable but snapshot data exists → forced, lowest score.
+// 3. No snapshot data at all → forced, oldest lastUsedAt (legacy behavior),
+//    so a failed refresh never regresses to "no target at all".
+function pickBestCodexTarget(accounts, currentKey) {
+  const candidates = accounts.filter((a) => !a.current && a.key !== currentKey && !a.disabled);
+
+  const scored = candidates
+    .filter((a) => hasUsageData(a.usageSnapshot))
+    .map((a) => ({
+      ...a,
+      viable: isTargetViable(a.usageSnapshot),
+      score: getScore(a.usageSnapshot),
+    }))
+    .sort((a, b) => a.score - b.score);
+
+  const viable = scored.filter((c) => c.viable);
+  if (viable.length > 0) return { target: viable[0], forced: false };
+  if (scored.length > 0) return { target: scored[0], forced: true };
+
+  const fallback = candidates.slice().sort((a, b) => {
+    const aMs = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
+    const bMs = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
+    return aMs - bMs;
+  });
+  if (fallback.length > 0) return { target: fallback[0], forced: true };
+  return { target: null, forced: false };
+}
+
+function toCodexUsageSnapshot(usage, fetchedAt = new Date().toISOString()) {
+  return {
+    five_hour: typeof usage.five_hour_percent === 'number' || usage.five_hour_reset ? {
+      utilization: usage.five_hour_percent,
+      resets_at: usage.five_hour_reset ?? null,
+    } : null,
+    seven_day: typeof usage.weekly_percent === 'number' || usage.weekly_reset ? {
+      utilization: usage.weekly_percent,
+      resets_at: usage.weekly_reset ?? null,
+    } : null,
+    fetchedAt,
+  };
+}
+
+// Refresh usage snapshots for ALL stored Codex accounts, deduped by
+// credential fingerprint so the same token is not fetched twice for org
+// variants. Per-account fetch failures keep the old snapshot and never
+// abort the run. Returns true when any snapshot changed.
+async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetchUsageFn = fetchCodexUsage) {
+  const { getCodexCredentialFingerprint } = require('../providers/codex-identity.cjs');
+  const usageByFingerprint = new Map();
+  const currentFingerprint = currentAuth ? getCodexCredentialFingerprint(currentAuth) : null;
+  if (currentFingerprint && currentUsage) {
+    usageByFingerprint.set(currentFingerprint, currentUsage);
+  }
+
+  let changed = false;
+  const now = new Date().toISOString();
+  for (const [index, entry] of (store.accounts || []).entries()) {
+    const accessToken = entry?.auth?.tokens?.access_token;
+    if (!accessToken) continue;
+    const fingerprint = getCodexCredentialFingerprint(entry.auth) || `entry:${entry.key}`;
+    if (!usageByFingerprint.has(fingerprint)) {
+      try {
+        usageByFingerprint.set(fingerprint, await fetchUsageFn(accessToken));
+      } catch {
+        // Keep the old snapshot for this credential; continue with the rest.
+        usageByFingerprint.set(fingerprint, null);
+      }
+    }
+    const usage = usageByFingerprint.get(fingerprint);
+    if (!usage) continue;
+    const snapshot = toCodexUsageSnapshot(usage, now);
+    if (!snapshot.five_hour && !snapshot.seven_day) continue;
+    const before = JSON.stringify(store.accounts[index].usageSnapshot || null);
+    if (before !== JSON.stringify(snapshot)) {
+      store.accounts[index].usageSnapshot = snapshot;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function runAutoSwitchClaude(context) {
   const {
     store,
@@ -77,10 +179,10 @@ async function runAutoSwitchClaude(context) {
     setRateLimitResetAt,
     setRateLimitResetAtFromIso,
     ensureDir,
+    notify: sendNotification = notify,
   } = context;
 
   const currentKey = getAccountKey(config.oauthAccount);
-  const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
   const accessToken = credentials?.claudeAiOauth?.accessToken;
 
   if (!accessToken) {
@@ -110,17 +212,21 @@ async function runAutoSwitchClaude(context) {
     return { switched: false };
   }
 
+  // Compute display accounts AFTER the snapshot refresh: the refresh replaces
+  // usageSnapshot objects on the store entries, so a pre-refresh shallow copy
+  // would still hold the stale snapshots and pickBestTarget would run blind.
+  const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
   const isRateLimited = currentUsage?.rate_limited === true;
   const { target, forced } = pickBestTarget(accounts, currentKey);
 
   if (!target) {
-    notify('OAuth Switch', 'All Claude accounts at capacity. No switch possible.');
+    sendNotification('OAuth Switch', 'All Claude accounts at capacity. No switch possible.');
     console.log('[auto] All accounts at capacity.');
     return { switched: false };
   }
 
   if (forced && !isRateLimited) {
-    notify('OAuth Switch', 'Claude usage high, but no viable target. Staying put.');
+    sendNotification('OAuth Switch', 'Claude usage high, but no viable target. Staying put.');
     console.log('[auto] No viable target. Only notifying.');
     return { switched: false };
   }
@@ -138,7 +244,7 @@ async function runAutoSwitchClaude(context) {
 
   const name = target.metadata?.emailAddress || target.key;
   const reason = isRateLimited ? 'rate limited (429)' : 'usage threshold exceeded';
-  notify('OAuth Switch', `Claude switched to ${name} (${reason}). Restart to apply.`);
+  sendNotification('OAuth Switch', `Claude switched to ${name} (${reason}). Restart to apply.`);
   console.log(`[auto] Switched Claude to ${name} (${reason}).`);
   return { switched: true };
 }
@@ -173,23 +279,31 @@ async function runAutoSwitchCodex(context) {
   }
 
   const currentKey = getCodexAccountKey(auth);
+
+  // Refresh ALL stored accounts' usage before picking, so target selection
+  // never runs on blind/stale data.
+  const snapshotsChanged = await refreshCodexUsageSnapshots(store, auth, currentUsage);
+  if (snapshotsChanged) {
+    store.updatedAt = new Date().toISOString();
+    writeJson(STORE_PATH, store);
+  }
+
   const accounts = getDisplayCodexAccounts(store, auth);
+  const isRateLimited = currentUsage?.rate_limited === true;
+  const { target, forced } = pickBestCodexTarget(accounts, currentKey);
 
-  const candidates = accounts
-    .filter((a) => !a.current && a.key !== currentKey && !a.disabled)
-    .sort((a, b) => {
-      const aScore = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
-      const bScore = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
-      return aScore - bScore;
-    });
-
-  if (candidates.length === 0) {
+  if (!target) {
     notify('OAuth Switch', 'All Codex accounts at capacity.');
     console.log('[auto] No Codex targets available.');
     return { switched: false };
   }
 
-  const target = candidates[0];
+  if (forced && !isRateLimited) {
+    notify('OAuth Switch', 'Codex usage high, but no viable target. Staying put.');
+    console.log('[auto] No viable Codex target. Only notifying.');
+    return { switched: false };
+  }
+
   backupFile(AUTH_PATH);
   if (typeof target.index === 'number' && store.accounts[target.index]) {
     store.accounts[target.index].lastUsedAt = new Date().toISOString();
@@ -262,8 +376,14 @@ module.exports = {
   runAutoSwitchClaude,
   runAutoSwitchCodex,
   THRESHOLDS,
+  SNAPSHOT_FRESHNESS_MS,
   notify,
   shouldTrigger,
+  isSnapshotFresh,
+  isTargetViable,
   pickBestTarget,
+  pickBestCodexTarget,
+  toCodexUsageSnapshot,
+  refreshCodexUsageSnapshots,
   fetchCodexUsage,
 };
