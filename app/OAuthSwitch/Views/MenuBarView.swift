@@ -9,9 +9,21 @@ private enum MenuBarTheme {
     static let providerRowsMaxHeight: CGFloat = 420
 }
 
+/// Reports the natural (unclipped) height of the provider rows content so the
+/// surrounding ScrollView can be sized explicitly. In a `.window` style
+/// MenuBarExtra the panel adopts the content's IDEAL height, and a ScrollView's
+/// ideal height is 0 — without an explicit frame the rows collapse entirely.
+private struct ProviderRowsHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("selectedProviderTab") private var selectedProviderTabRawValue: String = ""
+    @State private var providerRowsContentHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: MenuBarTheme.sectionSpacing) {
@@ -111,8 +123,25 @@ struct MenuBarView: View {
                             }
                         }
                     }
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: ProviderRowsHeightKey.self,
+                                value: proxy.size.height
+                            )
+                        }
+                    )
                 }
-                .frame(maxHeight: MenuBarTheme.providerRowsMaxHeight)
+                .onPreferenceChange(ProviderRowsHeightKey.self) { height in
+                    providerRowsContentHeight = height
+                }
+                // Explicit height: content height capped at the max. Guarantees
+                // the rows are visible (never ideal-height 0) and enables
+                // scrolling only once content exceeds the cap.
+                .frame(height: min(
+                    max(providerRowsContentHeight, 1),
+                    MenuBarTheme.providerRowsMaxHeight
+                ))
             }
         }
     }
