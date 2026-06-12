@@ -31,11 +31,18 @@ struct ClaudeAccount: Codable, Identifiable {
     let lastUsedAt: String?
     let usageSnapshot: UsageSnapshot?
     let disabled: Bool?
+    // "reauth_required" when the CLI marked this credential group as needing
+    // a manual Claude Code login (refreshToken rejected by the OAuth endpoint).
+    let credentialStatus: String?
 
     var id: String { key }
 
     var isDisabled: Bool {
         disabled == true
+    }
+
+    var needsReauth: Bool {
+        credentialStatus == "reauth_required"
     }
 
     var credentialFingerprint: String? {

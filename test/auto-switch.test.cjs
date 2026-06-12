@@ -611,13 +611,13 @@ test('pickBestCodexTarget honors excludeKey with fallback', () => {
   );
 });
 
-test('manual switch clears the auto-switch cooldown', () => {
+test('manual switch clears the auto-switch cooldown', async () => {
   freshStatePath();
   stateStore.recordAutoSwitch('claude', 'uuid:b', 'uuid:cur');
   assert.ok(stateStore.getLastAutoSwitch('claude'));
 
   const store = makeClaudeStore();
-  runSwitchAction({
+  await runSwitchAction({
     selected: {
       key: 'uuid:b',
       index: 1,

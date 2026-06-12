@@ -328,7 +328,7 @@ async function main() {
     }
 
     const selected = findSelection(accounts, options.selector);
-    runSwitchAction({
+    await runSwitchAction({
       selected,
       store,
       config,
@@ -349,7 +349,10 @@ async function main() {
       getRateLimitResetAt,
     });
   } catch (error) {
-    console.log(`Switch failed: ${error.message}`);
+    // Pre-flight blocks print their own first-line explanation already.
+    if (!error.printed) {
+      console.log(`Switch failed: ${error.message}`);
+    }
     process.exitCode = 1;
   }
 }

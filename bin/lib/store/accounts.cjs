@@ -86,6 +86,61 @@ function getClaudeAccountGroups(store) {
   return groups;
 }
 
+// Find the credential group (see getClaudeAccountGroups) that contains the
+// store entry with the given key. Returns null when the key is unknown.
+function findClaudeAccountGroup(store, key) {
+  return getClaudeAccountGroups(store).find((group) =>
+    group.entries.some(({ entry }) => entry.key === key)
+  ) || null;
+}
+
+// Apply a successful OAuth refresh to every store entry in a credential
+// group. Also clears any reauth marker: a successful refresh proves the
+// credentials are alive again. Returns true when anything changed.
+function applyRefreshedCredentialsToGroup(store, group, refreshed) {
+  let changed = false;
+  for (const { index } of group.entries) {
+    const entry = store.accounts[index];
+    const oauth = entry?.credentials?.claudeAiOauth;
+    if (!oauth) continue;
+    oauth.accessToken = refreshed.accessToken;
+    if (refreshed.refreshToken) oauth.refreshToken = refreshed.refreshToken;
+    if (refreshed.expiresAt) oauth.expiresAt = refreshed.expiresAt;
+    delete entry.credentialStatus;
+    delete entry.credentialCheckedAt;
+    changed = true;
+  }
+  return changed;
+}
+
+// Mark every entry in a credential group as needing a manual re-login
+// (refreshToken rejected by the OAuth token endpoint with a 4xx).
+function setGroupCredentialStatus(store, group, status, checkedAt) {
+  let changed = false;
+  for (const { index } of group.entries) {
+    const entry = store.accounts[index];
+    if (!entry) continue;
+    if (entry.credentialStatus !== status || entry.credentialCheckedAt !== checkedAt) changed = true;
+    entry.credentialStatus = status;
+    entry.credentialCheckedAt = checkedAt;
+  }
+  return changed;
+}
+
+function clearGroupCredentialStatus(store, group) {
+  let changed = false;
+  for (const { index } of group.entries) {
+    const entry = store.accounts[index];
+    if (!entry) continue;
+    if (entry.credentialStatus !== undefined || entry.credentialCheckedAt !== undefined) {
+      delete entry.credentialStatus;
+      delete entry.credentialCheckedAt;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function getDisplayAccounts(store, currentMetadata, currentCredentials) {
   const currentKey = currentMetadata ? getAccountKey(currentMetadata) : null;
   const currentCredentialKey = getClaudeCredentialFingerprint(currentCredentials);
@@ -202,6 +257,10 @@ module.exports = {
   getClaudeCredentialFingerprint,
   getClaudeAccountGroups,
   getClaudeAccountScopeKey,
+  findClaudeAccountGroup,
+  applyRefreshedCredentialsToGroup,
+  setGroupCredentialStatus,
+  clearGroupCredentialStatus,
   normalizeStore,
   getDisplayAccounts,
   syncStoreFromLive,

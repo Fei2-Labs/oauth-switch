@@ -1,5 +1,7 @@
 const {
   getClaudeAccountGroups,
+  setGroupCredentialStatus,
+  clearGroupCredentialStatus,
 } = require('../store/accounts.cjs');
 
 function formatUsageInfo(usage) {
@@ -137,7 +139,21 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
         // the live ~/.claude credentials/Keychain.
         const refreshTokenValue = representative?.credentials?.claudeAiOauth?.refreshToken;
         if (!isAuthFailure(err) || !refreshTokenValue) throw err;
-        const refreshed = await refreshOAuthToken(refreshTokenValue);
+        let refreshed;
+        try {
+          refreshed = await refreshOAuthToken(refreshTokenValue);
+        } catch (refreshErr) {
+          // A 4xx from the OAuth token endpoint means the refreshToken is
+          // revoked: the whole credential group needs a manual re-login.
+          // Network errors/timeouts are transient and must NOT mark.
+          const status = refreshErr?.statusCode;
+          if (typeof status === 'number' && status >= 400 && status < 500) {
+            if (setGroupCredentialStatus(store, group, 'reauth_required', new Date(now).toISOString())) {
+              changed = true;
+            }
+          }
+          throw refreshErr;
+        }
         for (const { index } of group.entries) {
           const oauth = store.accounts[index]?.credentials?.claudeAiOauth;
           if (!oauth) continue;
@@ -147,6 +163,12 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
           changed = true;
         }
         usage = await fetchUsage(refreshed.accessToken);
+      }
+      // The token works (fetch or refresh succeeded): clear any stale
+      // reauth marker on this credential group. A 429 proves nothing about
+      // the token, so a throttled response never clears.
+      if (!usage?.api_throttled && clearGroupCredentialStatus(store, group)) {
+        changed = true;
       }
       if (groupHasCurrent) {
         currentUsage = usage;

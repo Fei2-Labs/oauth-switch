@@ -80,7 +80,10 @@ function applyExcludeKey(candidates, excludeKey) {
 
 function pickBestTarget(accounts, currentKey, pickOptions = {}) {
   const candidates = applyExcludeKey(
-    accounts.filter((a) => !a.current && a.key !== currentKey && a.usageSnapshot && !a.disabled),
+    // reauth_required credentials would strand Claude Code on /login if
+    // switched to — exclude them at the same tier as disabled accounts.
+    accounts.filter((a) => !a.current && a.key !== currentKey && a.usageSnapshot && !a.disabled
+      && a.credentialStatus !== 'reauth_required'),
     pickOptions.excludeKey
   )
     .map((a) => ({

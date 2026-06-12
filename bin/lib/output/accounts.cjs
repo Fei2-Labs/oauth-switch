@@ -68,7 +68,10 @@ function formatAccountSummary(accounts, deps) {
     const lastUsed = formatRelativeTime(entry.lastUsedAt);
     const usageColumns = getUsageColumns(entry);
     const disabledMarker = entry.disabled ? ' | disabled' : '';
-    return `${marker} [${entry.index}] ${displayName} | ${plan} | ${usageColumns} | used:${lastUsed}${disabledMarker}`;
+    // Credentials rejected by the OAuth token endpoint: a manual login in
+    // Claude Code is needed before this account can be switched to.
+    const reauthMarker = entry.credentialStatus === 'reauth_required' ? ' | re-login' : '';
+    return `${marker} [${entry.index}] ${displayName} | ${plan} | ${usageColumns} | used:${lastUsed}${disabledMarker}${reauthMarker}`;
   });
 }
 

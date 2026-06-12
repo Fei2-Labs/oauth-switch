@@ -292,8 +292,8 @@ class AppState: ObservableObject {
                     secondaryTexts: [account.metadata?.planType].compactMap { $0 },
                     detailText: showResetTimes ? account.resetSummary : nil,
                     detailLines: [],
-                    statusText: account.isDisabled ? "Disabled" : nil,
-                    statusColorName: nil,
+                    statusText: account.needsReauth ? "Re-login" : (account.isDisabled ? "Disabled" : nil),
+                    statusColorName: account.needsReauth ? "red" : nil,
                     metrics: [
                         ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization),
                         ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization),
