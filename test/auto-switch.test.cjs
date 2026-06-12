@@ -138,10 +138,11 @@ test('snapshot without fetchedAt is never fresh', () => {
 
 // --- Codex usage refresh ----------------------------------------------------
 
-test('refreshCodexUsageSnapshots dedupes by credential fingerprint and keeps old snapshot on failure', async () => {
+test('refreshCodexUsageSnapshots dedupes by credential fingerprint and fetches only the oldest non-current group', async () => {
   const oldSnapshot = snapshot(40, 40, freshAt(3600000));
   const store = {
     accounts: [
+      // Missing snapshot counts as oldest: this group wins the single slot.
       { key: 'one', auth: { tokens: { access_token: 'tok-1', id_token: 'id-1' } } },
       { key: 'one-org-b', auth: { tokens: { access_token: 'tok-1', id_token: 'id-1' } } },
       { key: 'two', auth: { tokens: { access_token: 'tok-2', id_token: 'id-2' } }, usageSnapshot: oldSnapshot },
@@ -151,20 +152,37 @@ test('refreshCodexUsageSnapshots dedupes by credential fingerprint and keeps old
   const calls = [];
   const fakeFetch = async (token) => {
     calls.push(token);
-    if (token === 'tok-2') throw new Error('boom');
     return { five_hour_percent: 12, weekly_percent: 34, five_hour_reset: freshAt(), weekly_reset: freshAt() };
   };
 
   const { changed, apiThrottled } = await refreshCodexUsageSnapshots(store, null, null, fakeFetch);
 
-  assert.deepEqual(calls, ['tok-1', 'tok-2']); // tok-1 fetched once for both org variants
+  // tok-1 fetched once for both org variants; tok-2 is stale but waits for a
+  // future cycle (one non-current fetch per cycle).
+  assert.deepEqual(calls, ['tok-1']);
   assert.equal(changed, true);
   assert.equal(apiThrottled, null);
   assert.equal(store.accounts[0].usageSnapshot.five_hour.utilization, 12);
   assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 12);
   assert.ok(store.accounts[0].usageSnapshot.fetchedAt);
-  assert.deepEqual(store.accounts[2].usageSnapshot, oldSnapshot); // failure keeps old snapshot
+  assert.deepEqual(store.accounts[2].usageSnapshot, oldSnapshot); // not its turn yet
   assert.equal(store.accounts[3].usageSnapshot, undefined);
+});
+
+test('refreshCodexUsageSnapshots keeps old snapshot when the single fetch fails', async () => {
+  const oldSnapshot = snapshot(40, 40, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000));
+  const store = {
+    accounts: [
+      { key: 'two', auth: { tokens: { access_token: 'tok-2', id_token: 'id-2' } }, usageSnapshot: JSON.parse(JSON.stringify(oldSnapshot)) },
+    ],
+  };
+  const fakeFetch = async () => { throw new Error('boom'); };
+
+  const { changed, apiThrottled } = await refreshCodexUsageSnapshots(store, null, null, fakeFetch);
+
+  assert.equal(changed, false);
+  assert.equal(apiThrottled, null);
+  assert.deepEqual(store.accounts[0].usageSnapshot, oldSnapshot);
 });
 
 test('refreshCodexUsageSnapshots reuses current account usage instead of refetching', async () => {
@@ -480,6 +498,40 @@ test('refreshStoredUsageSnapshots fetches current first, skips fresh non-current
   assert.equal(apiThrottled, null);
 });
 
+test('refreshStoredUsageSnapshots fetches only the oldest of several stale non-current groups', async () => {
+  const makeAccount = (name, snap) => ({
+    key: `uuid:${name}`,
+    metadata: { accountUuid: name, emailAddress: `${name}@example.com` },
+    credentials: { claudeAiOauth: { accessToken: `${name}-token` } },
+    ...(snap ? { usageSnapshot: snap } : {}),
+  });
+  const store = {
+    accounts: [
+      makeAccount('cur', snapshot(50, 50, freshAt(60 * 1000))),
+      makeAccount('stale1', snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 10 * 60 * 1000))),
+      makeAccount('stale2', snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 60 * 1000))), // oldest
+      makeAccount('stale3', snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 30 * 60 * 1000))),
+    ],
+  };
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    return {
+      five_hour: { utilization: 42, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 42, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const { apiThrottled } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  // Budget: current group + exactly ONE non-current group (the oldest).
+  assert.deepEqual(calls, ['cur-token', 'stale2-token']);
+  assert.equal(apiThrottled, null);
+  assert.equal(store.accounts[2].usageSnapshot.five_hour.utilization, 42);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // waits for a future cycle
+  assert.equal(store.accounts[3].usageSnapshot.five_hour.utilization, 10);
+});
+
 test('refreshStoredUsageSnapshots aborts remaining fetches on api_throttled and keeps old snapshots', async () => {
   const oldSnapshotB = snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000));
   const store = {
@@ -516,11 +568,34 @@ test('refreshStoredUsageSnapshots aborts remaining fetches on api_throttled and 
 
   const { currentUsage, apiThrottled } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
 
-  assert.deepEqual(calls, ['cur-token', 'b-token']); // c-token never fetched
+  // The single non-current slot goes to c (missing snapshot = oldest); its
+  // throttled response is reported and b's old snapshot is kept.
+  assert.deepEqual(calls, ['cur-token', 'c-token']); // b-token never fetched
   assert.deepEqual(apiThrottled, { retryAfter: 300 });
   assert.equal(currentUsage.five_hour.utilization, 95);
   assert.deepEqual(store.accounts[1].usageSnapshot, oldSnapshotB); // kept
   assert.equal(store.accounts[2].usageSnapshot, undefined);
+});
+
+// --- Stale-window (past resets_at) scoring ----------------------------------
+
+test('getScore treats a window with past resets_at as reset (0 utilization)', () => {
+  // Both windows reset in the past: stored 100% utilization is obsolete.
+  const resetSnapshot = {
+    five_hour: { utilization: 100, resets_at: freshAt(60 * 1000) },
+    seven_day: { utilization: 100, resets_at: freshAt(60 * 1000) },
+    fetchedAt: freshAt(),
+  };
+  const accounts = [
+    { key: 'a', current: true, usageSnapshot: snapshot(95, 95) },
+    { key: 'b', usageSnapshot: resetSnapshot },
+    { key: 'c', usageSnapshot: snapshot(70, 85) },
+  ];
+  const { target, forced } = pickBestTarget(accounts, 'a');
+  // Viability stays conservative (raw 100/100 is not viable), but on the
+  // forced path b scores 0 (both windows reset) and beats c's 70/85.
+  assert.equal(forced, true);
+  assert.equal(target.key, 'b');
 });
 
 test('refreshStoredUsageSnapshots reports api_throttled when the current account fetch is throttled', async () => {
@@ -742,7 +817,9 @@ test('refreshCodexUsageSnapshots aborts remaining fetches on api_throttled and k
 
   const { changed, apiThrottled } = await refreshCodexUsageSnapshots(store, null, null, fakeFetch);
 
-  assert.deepEqual(calls, ['tok-1']); // tok-2 never fetched
+  // The single non-current slot goes to tok-2 (missing snapshot = oldest);
+  // its throttled response aborts the cycle and old snapshots are kept.
+  assert.deepEqual(calls, ['tok-2']); // tok-1 never fetched
   assert.deepEqual(apiThrottled, { retryAfter: 300 });
   assert.equal(changed, false);
   assert.deepEqual(store.accounts[0].usageSnapshot, oldSnapshot);

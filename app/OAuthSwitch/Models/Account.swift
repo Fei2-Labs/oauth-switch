@@ -22,6 +22,25 @@ struct UsageSnapshot: Codable {
     }
 }
 
+extension UsageSnapshot.Window {
+    var resetDate: Date? {
+        parseISODate(resets_at)
+    }
+
+    // resets_at in the past means the window HAS reset since the snapshot was
+    // taken: the stored utilization is obsolete.
+    var hasResetInPast: Bool {
+        guard let resetDate else { return false }
+        return resetDate < Date()
+    }
+
+    // Reset-aware utilization: a window that already reset counts as 0 used.
+    // Only a network refresh gives better data.
+    var effectiveUtilization: Double? {
+        hasResetInPast ? 0 : utilization
+    }
+}
+
 // NOTE: Claude Code account model
 struct ClaudeAccount: Codable, Identifiable {
     let key: String
@@ -74,11 +93,21 @@ struct ClaudeAccount: Codable, Identifiable {
     }
 
     var fiveHourUsed: Double {
-        usageSnapshot?.five_hour?.utilization ?? 0
+        usageSnapshot?.five_hour?.effectiveUtilization ?? 0
     }
 
     var sevenDayUsed: Double {
-        usageSnapshot?.seven_day?.utilization ?? 0
+        usageSnapshot?.seven_day?.effectiveUtilization ?? 0
+    }
+
+    // True when the stored window already reset: the displayed 0% is an
+    // estimate, not fetched data.
+    var fiveHourIsStale: Bool {
+        usageSnapshot?.five_hour?.hasResetInPast == true
+    }
+
+    var sevenDayIsStale: Bool {
+        usageSnapshot?.seven_day?.hasResetInPast == true
     }
 
     var resetSummary: String? {
@@ -91,11 +120,11 @@ struct ClaudeAccount: Codable, Identifiable {
     }
 
     private var fiveHourRemainingPercent: Double? {
-        remainingPercent(fromUsed: usageSnapshot?.five_hour?.utilization)
+        remainingPercent(fromUsed: usageSnapshot?.five_hour?.effectiveUtilization)
     }
 
     private var sevenDayRemainingPercent: Double? {
-        remainingPercent(fromUsed: usageSnapshot?.seven_day?.utilization)
+        remainingPercent(fromUsed: usageSnapshot?.seven_day?.effectiveUtilization)
     }
 }
 
@@ -230,11 +259,21 @@ struct CodexAccount: Codable, Identifiable {
     }
 
     var fiveHourUsed: Double? {
-        usageSnapshot?.five_hour?.utilization
+        usageSnapshot?.five_hour?.effectiveUtilization
     }
 
     var sevenDayUsed: Double? {
-        usageSnapshot?.seven_day?.utilization
+        usageSnapshot?.seven_day?.effectiveUtilization
+    }
+
+    // True when the stored window already reset: the displayed 0% is an
+    // estimate, not fetched data.
+    var fiveHourIsStale: Bool {
+        usageSnapshot?.five_hour?.hasResetInPast == true
+    }
+
+    var sevenDayIsStale: Bool {
+        usageSnapshot?.seven_day?.hasResetInPast == true
     }
 
     var resetSummary: String? {
@@ -263,14 +302,10 @@ private extension UsageSnapshot {
     }
 
     func formattedReset(_ isoString: String?, label: String) -> String? {
-        guard let isoString else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fallbackFormatter = ISO8601DateFormatter()
-        fallbackFormatter.formatOptions = [.withInternetDateTime]
-        guard let date = formatter.date(from: isoString) ?? fallbackFormatter.date(from: isoString) else {
-            return nil
-        }
+        guard let date = parseISODate(isoString) else { return nil }
+        // A reset time in the past is no longer informative: the window
+        // already reset, so don't show "resets <yesterday>".
+        guard date >= Date() else { return nil }
         return "\(label) resets \(formatMenuDateTime(date))"
     }
 }
@@ -642,6 +677,18 @@ private func formatMenuDateTime(_ date: Date) -> String {
             .hour(.defaultDigits(amPM: .abbreviated))
             .minute(.twoDigits)
     )
+}
+
+private func parseISODate(_ isoString: String?) -> Date? {
+    guard let isoString else { return nil }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = formatter.date(from: isoString) {
+        return date
+    }
+    let fallbackFormatter = ISO8601DateFormatter()
+    fallbackFormatter.formatOptions = [.withInternetDateTime]
+    return fallbackFormatter.date(from: isoString)
 }
 
 private func remainingPercent(fromUsed used: Double?) -> Double? {

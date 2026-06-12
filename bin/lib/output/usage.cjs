@@ -109,11 +109,14 @@ function formatDurationUntil(dateLike) {
 }
 
 function getUsageColumns(entry, getRateLimitResetAt) {
+  const { effectiveWindowUtilization } = require('../usage/format.cjs');
   const usage = entry.usageSnapshot || {};
   const rateLimitReset = entry.current ? getRateLimitResetAt() : null;
-  const fiveHourPct = formatUsagePercent(usage.five_hour?.utilization);
+  // Windows whose resets_at already passed have reset since the snapshot was
+  // taken: render them as fully available (formatDurationUntil shows "now").
+  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour));
   const fiveHourReset = formatDurationUntil(usage.five_hour?.resets_at);
-  const sevenDayPct = formatUsagePercent(usage.seven_day?.utilization);
+  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day));
   const sevenDayReset = formatDurationUntil(rateLimitReset || usage.seven_day?.resets_at);
   return `5H:${fiveHourPct} (${fiveHourReset}) | 7D:${sevenDayPct} (${sevenDayReset})`;
 }

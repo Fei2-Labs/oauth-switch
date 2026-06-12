@@ -86,6 +86,22 @@ function shouldKeepExistingSnapshot(existingSnapshot, nextSnapshot, isCurrentAcc
   return false;
 }
 
+// A usage window whose resets_at is already in the past HAS reset since the
+// snapshot was taken: its stored utilization is obsolete. For display and
+// scoring it counts as 0 (the window restarted); callers can use
+// isWindowReset to mark the value as an estimate.
+function isWindowReset(window, now = Date.now()) {
+  if (!window || !window.resets_at) return false;
+  const resetAt = new Date(window.resets_at).getTime();
+  return !Number.isNaN(resetAt) && resetAt <= now;
+}
+
+function effectiveWindowUtilization(window, now = Date.now()) {
+  if (!window) return undefined;
+  if (isWindowReset(window, now)) return 0;
+  return window.utilization;
+}
+
 function isAuthFailure(err) {
   return err?.statusCode === 401 || err?.statusCode === 403;
 }
@@ -102,6 +118,17 @@ function isSnapshotFresherThan(snapshot, maxAgeMs, now = Date.now()) {
   return now - fetched <= maxAgeMs;
 }
 
+function pickGroupRepresentative(group) {
+  return group.entries.find(({ entry }) => entry?.credentials?.claudeAiOauth?.accessToken)?.entry
+    || group.entries[0]?.entry;
+}
+
+function snapshotFetchedAtMs(snapshot) {
+  if (!snapshot || !snapshot.fetchedAt) return 0;
+  const ms = new Date(snapshot.fetchedAt).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, options = {}) {
   const refreshOAuthToken = options.refreshOAuthToken || require('./fetch.cjs').refreshOAuthToken;
   const now = options.now ?? Date.now();
@@ -114,21 +141,28 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
   // throttle response aborts all remaining fetches in this loop.
   const groups = getClaudeAccountGroups(store);
   const hasCurrent = (group) => group.entries.some(({ entry }) => entry.key === currentKey);
-  const orderedGroups = [...groups.filter(hasCurrent), ...groups.filter((g) => !hasCurrent(g))];
+  // Request budget: at most ONE non-current group is fetched per cycle — the
+  // eligible one with the OLDEST snapshot (missing snapshot counts as oldest).
+  // The rest wait for future cycles, which yields a natural round-robin.
+  // Fully disabled groups can never be switch targets and fresh-enough
+  // snapshots are never refetched, so neither consumes the single slot.
+  const eligibleNonCurrent = groups
+    .filter((g) => !hasCurrent(g))
+    .filter((group) => {
+      const representative = pickGroupRepresentative(group);
+      if (!representative?.credentials?.claudeAiOauth?.accessToken) return false;
+      if (group.entries.every(({ entry }) => entry.disabled)) return false;
+      return !isSnapshotFresherThan(representative.usageSnapshot, NONCURRENT_REFRESH_MS, now);
+    })
+    .sort((a, b) => snapshotFetchedAtMs(pickGroupRepresentative(a)?.usageSnapshot)
+      - snapshotFetchedAtMs(pickGroupRepresentative(b)?.usageSnapshot));
+  const orderedGroups = [...groups.filter(hasCurrent), ...eligibleNonCurrent.slice(0, 1)];
 
   for (const group of orderedGroups) {
-    const representative = group.entries.find(({ entry }) => entry?.credentials?.claudeAiOauth?.accessToken)?.entry
-      || group.entries[0]?.entry;
+    const representative = pickGroupRepresentative(group);
     const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
     const groupHasCurrent = hasCurrent(group);
-    if (!groupHasCurrent) {
-      // Fully disabled groups can never be switch targets: don't spend
-      // usage-API requests on them.
-      if (group.entries.every(({ entry }) => entry.disabled)) continue;
-      // Recent-enough snapshot: skip the refetch to cut polling volume.
-      if (isSnapshotFresherThan(representative.usageSnapshot, NONCURRENT_REFRESH_MS, now)) continue;
-    }
     try {
       let usage;
       try {
@@ -253,9 +287,11 @@ function formatResetEstimate(isoString, accountKey, getRateLimitResetAt, resetWi
 function getUsageColumns(entry, getRateLimitResetAt, resetWindowDays) {
   const usage = entry.usageSnapshot || {};
   const rateLimitReset = entry.current ? getRateLimitResetAt() : null;
-  const fiveHourPct = formatUsagePercent(usage.five_hour?.utilization);
+  // Windows whose resets_at already passed have reset since the snapshot was
+  // taken: render them as 0% used (formatDurationUntil shows "now").
+  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour));
   const fiveHourReset = formatDurationUntil(usage.five_hour?.resets_at);
-  const sevenDayPct = formatUsagePercent(usage.seven_day?.utilization);
+  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day));
   const sevenDayReset = formatDurationUntil(rateLimitReset || usage.seven_day?.resets_at) || formatResetEstimate(entry.lastSyncedAt, entry.current ? entry.key : null, getRateLimitResetAt, resetWindowDays);
   return `5H:${fiveHourPct}(${fiveHourReset}) | 7D:${sevenDayPct} (${sevenDayReset})`;
 }
@@ -266,6 +302,8 @@ module.exports = {
   refreshStoredUsageSnapshots,
   NONCURRENT_REFRESH_MS,
   isSnapshotFresherThan,
+  isWindowReset,
+  effectiveWindowUtilization,
   formatUsagePercent,
   formatDurationUntil,
   formatResetEstimate,

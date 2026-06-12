@@ -11,7 +11,7 @@ const THRESHOLDS = {
 const { getDisplayAccounts } = require('../store/accounts.cjs');
 const { logEvent, formatLine } = require('../log.cjs');
 const state = require('../store/state.cjs');
-const { NONCURRENT_REFRESH_MS, isSnapshotFresherThan } = require('../usage/format.cjs');
+const { NONCURRENT_REFRESH_MS, isSnapshotFresherThan, effectiveWindowUtilization } = require('../usage/format.cjs');
 
 const { AUTO_SWITCH_COOLDOWN_MS, SWITCHED_FROM_EXCLUDE_MS } = state;
 
@@ -101,8 +101,11 @@ function pickBestTarget(accounts, currentKey, pickOptions = {}) {
 }
 
 function getScore(snapshot) {
-  const fiveH = snapshot?.five_hour?.utilization ?? 100;
-  const sevenD = snapshot?.seven_day?.utilization ?? 100;
+  // Reset-aware: a window whose resets_at already passed HAS reset since the
+  // snapshot was taken, so it scores as 0 utilization. The 2h freshness gate
+  // for viability is unaffected — this only improves the score fallback.
+  const fiveH = effectiveWindowUtilization(snapshot?.five_hour) ?? 100;
+  const sevenD = effectiveWindowUtilization(snapshot?.seven_day) ?? 100;
   return fiveH * 0.6 + sevenD * 0.4;
 }
 
@@ -162,10 +165,13 @@ function toCodexUsageSnapshot(usage, fetchedAt = new Date().toISOString()) {
 // Refresh usage snapshots for stored Codex accounts, deduped by credential
 // fingerprint so the same token is not fetched twice for org variants.
 // Non-current credentials are only refetched when their snapshot is missing
-// or older than NONCURRENT_REFRESH_MS; fully disabled credential groups are
-// never fetched (they can't be targets). Per-account fetch failures keep the
-// old snapshot. An api_throttled response (endpoint throttling) aborts all
-// remaining fetches immediately. Returns { changed, apiThrottled }.
+// or older than NONCURRENT_REFRESH_MS, and at most ONE non-current credential
+// group is fetched per cycle — the eligible one with the OLDEST snapshot
+// (missing counts as oldest), yielding a natural round-robin. Fully disabled
+// credential groups are never fetched (they can't be targets). Per-account
+// fetch failures keep the old snapshot. An api_throttled response (endpoint
+// throttling) aborts all remaining fetches immediately.
+// Returns { changed, apiThrottled }.
 async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetchUsageFn = fetchCodexUsage, now = Date.now()) {
   const { getCodexCredentialFingerprint } = require('../providers/codex-identity.cjs');
   const usageByFingerprint = new Map();
@@ -183,6 +189,27 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
     entriesByFingerprint.get(fingerprint).push(entry);
   }
 
+  // Request budget: at most ONE non-current credential group is fetched per
+  // cycle — the eligible one with the OLDEST snapshot across its org variants
+  // (missing snapshot counts as oldest). Round-robin emerges over cycles.
+  const snapshotMs = (snapshot) => {
+    if (!snapshot || !snapshot.fetchedAt) return 0;
+    const ms = new Date(snapshot.fetchedAt).getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  };
+  const fetchCandidates = [];
+  for (const [fingerprint, groupEntries] of entriesByFingerprint) {
+    if (usageByFingerprint.has(fingerprint)) continue;
+    // Fully disabled credential groups can never be switch targets.
+    if (groupEntries.every((e) => e.disabled)) continue;
+    // Recent-enough snapshot on any org variant: skip the refetch.
+    if (groupEntries.some((e) => isSnapshotFresherThan(e.usageSnapshot, NONCURRENT_REFRESH_MS, now))) continue;
+    const newestMs = groupEntries.reduce((max, e) => Math.max(max, snapshotMs(e.usageSnapshot)), 0);
+    fetchCandidates.push({ fingerprint, newestMs });
+  }
+  fetchCandidates.sort((a, b) => a.newestMs - b.newestMs);
+  const allowedFetchFingerprint = fetchCandidates.length > 0 ? fetchCandidates[0].fingerprint : null;
+
   let changed = false;
   let apiThrottled = null;
   const nowIso = new Date(now).toISOString();
@@ -191,11 +218,7 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
     if (!accessToken) continue;
     const fingerprint = fingerprintOf(entry);
     if (!usageByFingerprint.has(fingerprint)) {
-      const groupEntries = entriesByFingerprint.get(fingerprint) || [entry];
-      // Fully disabled credential groups can never be switch targets.
-      if (groupEntries.every((e) => e.disabled)) continue;
-      // Recent-enough snapshot on any org variant: skip the refetch.
-      if (groupEntries.some((e) => isSnapshotFresherThan(e.usageSnapshot, NONCURRENT_REFRESH_MS, now))) continue;
+      if (fingerprint !== allowedFetchFingerprint) continue;
       try {
         const fetched = await fetchUsageFn(accessToken);
         if (fetched?.api_throttled) {
