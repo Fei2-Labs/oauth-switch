@@ -281,8 +281,53 @@ class AppState: ObservableObject {
             : summary + "\nRestart Claude Code to apply."
     }
 
+    /// Sorts account rows for display: active first, then healthy accounts by
+    /// remaining quota descending (nil/unknown after known values), then
+    /// needs-reauth accounts, then disabled accounts last. Ties keep store order.
+    private static func sortedForDisplay<T>(
+        _ accounts: [T],
+        isActive: (T) -> Bool,
+        remaining: (T) -> Double?,
+        needsReauth: (T) -> Bool,
+        isDisabled: (T) -> Bool
+    ) -> [T] {
+        func tier(_ account: T) -> Int {
+            if isActive(account) { return 0 }
+            if isDisabled(account) { return 3 }
+            if needsReauth(account) { return 2 }
+            return 1
+        }
+        return accounts.enumerated().sorted { lhs, rhs in
+            let lt = tier(lhs.element)
+            let rt = tier(rhs.element)
+            if lt != rt { return lt < rt }
+            if lt == 1 {
+                let lr = remaining(lhs.element)
+                let rr = remaining(rhs.element)
+                switch (lr, rr) {
+                case let (l?, r?) where l != r:
+                    return l > r
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                default:
+                    break
+                }
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
     private func buildClaudeSection() -> ProviderSectionSnapshot {
-        let accounts = showInactiveAccounts ? claudeAccounts : claudeAccounts.filter { $0.matchesActiveKey(activeClaudeKey) }
+        let visibleAccounts = showInactiveAccounts ? claudeAccounts : claudeAccounts.filter { $0.matchesActiveKey(activeClaudeKey) }
+        let accounts = Self.sortedForDisplay(
+            visibleAccounts,
+            isActive: { $0.matchesActiveKey(self.activeClaudeKey) },
+            remaining: { $0.lowestRemainingPercent },
+            needsReauth: { $0.needsReauth },
+            isDisabled: { $0.isDisabled }
+        )
         return ProviderSectionSnapshot(
             id: .claude,
             rows: accounts.map { account in
@@ -310,9 +355,16 @@ class AppState: ObservableObject {
     }
 
     private func buildCodexSection() -> ProviderSectionSnapshot {
+        let accounts = Self.sortedForDisplay(
+            codexAccounts,
+            isActive: { $0.matchesActiveKey(self.activeCodexKey) },
+            remaining: { $0.lowestRemainingPercent },
+            needsReauth: { _ in false },
+            isDisabled: { $0.isDisabled }
+        )
         return ProviderSectionSnapshot(
             id: .codex,
-            rows: codexAccounts.map { account in
+            rows: accounts.map { account in
                 return ProviderRowSnapshot(
                     id: account.id,
                     title: account.label,
