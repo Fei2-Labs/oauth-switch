@@ -205,11 +205,24 @@ test('keep-alive: 401 + refresh 400 marks the credential group', async () => {
   const fetchUsage = async () => { throw authError(401); };
   const refreshOAuthToken = async () => { throw authError(400); };
 
-  const { changed } = await refreshStoredUsageSnapshots(store, 'uuid:b', fetchUsage, { refreshOAuthToken });
+  const { changed } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fetchUsage, { refreshOAuthToken });
 
   assert.equal(changed, true);
   assert.equal(store.accounts[1].credentialStatus, 'reauth_required');
   assert.equal(store.accounts[2].credentialStatus, 'reauth_required');
+});
+
+test('keep-alive: a group containing the CURRENT account is never marked reauth_required', async () => {
+  const store = makeStore();
+  const fetchUsage = async () => { throw authError(401); };
+  const refreshOAuthToken = async () => { throw authError(400); };
+
+  // current account is in the b group -> guard must prevent marking it dead.
+  await refreshStoredUsageSnapshots(store, 'uuid:b', fetchUsage, { refreshOAuthToken });
+
+  // The b group is the current account: never marked, regardless of other groups.
+  assert.equal(store.accounts[1].credentialStatus, undefined);
+  assert.equal(store.accounts[2].credentialStatus, undefined);
 });
 
 test('keep-alive: later successful fetch clears the marker', async () => {

@@ -186,7 +186,12 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
           // Network errors/timeouts are transient and must NOT mark.
           // Only 400/401/403/404 = dead refresh token. 5xx, network errors,
           // timeouts and 429 are transient and must NOT mark reauth_required.
-          if (REAUTH_STATUS_CODES.has(refreshErr?.statusCode)) {
+          // Safety guard: NEVER mark the currently-active account as
+          // reauth_required. Its authoritative credentials live in the
+          // Keychain/live config and are refreshed from live via
+          // syncStoreFromLive every cycle, so a stale pool-copy 401 here is not
+          // evidence the account is dead — the next sync from live will heal it.
+          if (REAUTH_STATUS_CODES.has(refreshErr?.statusCode) && !groupHasCurrent) {
             if (setGroupCredentialStatus(store, group, 'reauth_required', new Date(now).toISOString())) {
               changed = true;
             }

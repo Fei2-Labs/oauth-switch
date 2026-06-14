@@ -4,6 +4,7 @@ const {
   findClaudeAccountGroup,
   applyRefreshedCredentialsToGroup,
   setGroupCredentialStatus,
+  getAccountKey,
 } = require('../store/accounts.cjs');
 
 // Pre-flight margin: snapshots whose accessToken expires within this window
@@ -36,11 +37,16 @@ function credentialNeedsRefresh(oauth, now = Date.now()) {
 //
 // Returns true when the store changed (refresh applied or group marked).
 // Throws a printed, exit-worthy error when the target's credentials are dead.
-async function ensureSwitchableCredentials({ selected, store, options, writeStore, refreshOAuthToken, now }) {
+async function ensureSwitchableCredentials({ selected, store, options, writeStore, refreshOAuthToken, now, currentKey }) {
   const oauth = selected?.credentials?.claudeAiOauth;
   // No OAuth credentials or no refreshToken: nothing we can verify or
   // refresh — switch as before (legacy entries).
   if (!oauth?.refreshToken) return false;
+  // Switching to the account that is already live (switch-to-self): the live
+  // config/Keychain already holds its authoritative credentials, so a stale
+  // pool-copy refresh failure is not evidence the account is dead. Skip the
+  // pre-flight refresh + dead-cred marking entirely.
+  if (currentKey && selected?.key && selected.key === currentKey) return false;
   if (!credentialNeedsRefresh(oauth, now)) return false;
 
   const email = selected.metadata?.emailAddress || selected.key;
@@ -108,6 +114,7 @@ async function runSwitchAction(context) {
     writeStore,
     refreshOAuthToken,
     now: context.now ?? Date.now(),
+    currentKey: config?.oauthAccount ? getAccountKey(config.oauthAccount) : null,
   });
 
   const now = new Date().toISOString();

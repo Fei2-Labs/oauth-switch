@@ -290,6 +290,69 @@ test('failed OAuth refresh keeps old snapshot and credentials, continues silentl
   assert.deepEqual(store.accounts[0].usageSnapshot, oldSnapshot);
 });
 
+test('group WITHOUT current account: dead refresh token marks reauth_required', async () => {
+  const store = claudeStore();
+  const fakeFetch = async () => {
+    const err = new Error('Usage API returned 401');
+    err.statusCode = 401;
+    throw err;
+  };
+  const fakeRefresh = async () => {
+    const err = new Error('invalid_grant');
+    err.statusCode = 400;
+    throw err;
+  };
+
+  const { changed } = await refreshStoredUsageSnapshots(store, 'other-key', fakeFetch, {
+    refreshOAuthToken: fakeRefresh,
+  });
+
+  assert.equal(changed, true);
+  for (const entry of store.accounts) {
+    assert.equal(entry.credentialStatus, 'reauth_required');
+  }
+});
+
+test('group WITH current account: dead refresh token is NOT marked (active account protected)', async () => {
+  const store = claudeStore();
+  const fakeFetch = async () => {
+    const err = new Error('Usage API returned 401');
+    err.statusCode = 401;
+    throw err;
+  };
+  const fakeRefresh = async () => {
+    const err = new Error('invalid_grant');
+    err.statusCode = 400;
+    throw err;
+  };
+
+  // currentKey matches a store entry -> the group contains the current account.
+  const { changed } = await refreshStoredUsageSnapshots(store, 'uuid:u1', fakeFetch, {
+    refreshOAuthToken: fakeRefresh,
+  });
+
+  assert.equal(changed, false);
+  for (const entry of store.accounts) {
+    assert.notEqual(entry.credentialStatus, 'reauth_required');
+  }
+});
+
+test('successful fetch still clears a stale reauth marker on the current account group', async () => {
+  const store = claudeStore();
+  for (const entry of store.accounts) entry.credentialStatus = 'reauth_required';
+  const fakeFetch = async () => ({
+    five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+    seven_day: { utilization: 6, resets_at: freshAt(-86400000) },
+  });
+
+  const { changed } = await refreshStoredUsageSnapshots(store, 'uuid:u1', fakeFetch);
+
+  assert.equal(changed, true);
+  for (const entry of store.accounts) {
+    assert.notEqual(entry.credentialStatus, 'reauth_required');
+  }
+});
+
 // --- Claude auto-switch sees just-refreshed snapshots -------------------------
 
 test('runAutoSwitchClaude picks targets from snapshots written during this run', async () => {
