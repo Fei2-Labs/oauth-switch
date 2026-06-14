@@ -359,7 +359,9 @@ struct MetricBadge: View {
             Text(metric.label.uppercased())
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
-            Text("\(Int(min(100, max(0, metric.value)).rounded()))%")
+            // Stale snapshot: append "?" so the percentage is not read as the
+            // live balance.
+            Text("\(Int(min(100, max(0, metric.value)).rounded()))%\(metric.isStale ? "?" : "")")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(color)
         }
@@ -369,6 +371,8 @@ struct MetricBadge: View {
             Capsule(style: .continuous)
                 .fill(color.opacity(0.12))
         )
+        // Dim stale metrics so cached data reads as muted, not authoritative.
+        .opacity(metric.isStale ? 0.45 : 1)
     }
 }
 

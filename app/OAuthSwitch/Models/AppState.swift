@@ -110,19 +110,28 @@ class AppState: ObservableObject {
 
     var menuBarBalanceText: String? {
         let percent: Double?
+        // Windsurf has no usage-API snapshot timestamp, so it is never marked stale.
+        var isStale = false
         switch menuBarBalanceSource {
         case .off:
             return nil
         case .claude:
-            percent = claudeAccounts.first(where: { $0.matchesActiveKey(activeClaudeKey) })?.lowestRemainingPercent
+            let account = claudeAccounts.first(where: { $0.matchesActiveKey(activeClaudeKey) })
+            percent = account?.lowestRemainingPercent
+            isStale = account?.usageIsStale ?? false
         case .codex:
-            percent = codexAccounts.first(where: { $0.matchesActiveKey(activeCodexKey) })?.lowestRemainingPercent
+            let account = codexAccounts.first(where: { $0.matchesActiveKey(activeCodexKey) })
+            percent = account?.lowestRemainingPercent
+            isStale = account?.usageIsStale ?? false
         case .windsurf:
             percent = windsurfAccounts.first(where: { $0.key == activeWindsurfKey })?.lowestRemainingPercent
         }
 
         guard let percent, !percent.isNaN else { return nil }
-        return "\(Int(percent.rounded()))% left"
+        // Stale snapshot: append a compact marker so the number is not trusted
+        // as the live balance (e.g. "100% left ·?").
+        let suffix = isStale ? " ·?" : ""
+        return "\(Int(percent.rounded()))% left\(suffix)"
     }
 
     var isLoading: Bool {
@@ -138,14 +147,18 @@ class AppState: ObservableObject {
         startPolling()
     }
 
-    func loadAll() {
+    // force: true bypasses the usage-API throttle gate (passes --force to the
+    // `usage` / `codex sync-usage` CLI paths). Only the explicit "Refresh All"
+    // button forces; the 5-minute timer and post-switch reloads do NOT, so they
+    // keep respecting the daemon's 429 backoff.
+    func loadAll(force: Bool = false) {
         let providers = Set(ProviderID.allCases)
         DispatchQueue.main.async {
             self.loadingProviders = providers
         }
 
-        loadClaude()
-        loadCodex()
+        loadClaude(force: force)
+        loadCodex(force: force)
         loadKiro()
         loadWindsurf()
     }
@@ -182,7 +195,8 @@ class AppState: ObservableObject {
         case let .toggleDisabled(provider, key, disabled):
             setAccountDisabled(provider: provider, key: key, disabled: disabled)
         case .refresh:
-            loadAll()
+            // Explicit user refresh forces a fetch even while throttled.
+            loadAll(force: true)
         }
     }
 
@@ -319,6 +333,14 @@ class AppState: ObservableObject {
         }.map(\.element)
     }
 
+    // Appends a stale-data age marker ("· data 3h ago") to a row's detail text.
+    private static func appendingAge(_ base: String?, _ ageText: String?) -> String? {
+        guard let ageText else { return base }
+        let marker = "data \(ageText)"
+        guard let base, !base.isEmpty else { return marker }
+        return "\(base) · \(marker)"
+    }
+
     private func buildClaudeSection() -> ProviderSectionSnapshot {
         let visibleAccounts = showInactiveAccounts ? claudeAccounts : claudeAccounts.filter { $0.matchesActiveKey(activeClaudeKey) }
         let accounts = Self.sortedForDisplay(
@@ -335,13 +357,13 @@ class AppState: ObservableObject {
                     id: account.id,
                     title: account.displayName,
                     secondaryTexts: [account.metadata?.planType].compactMap { $0 },
-                    detailText: showResetTimes ? account.resetSummary : nil,
+                    detailText: Self.appendingAge(showResetTimes ? account.resetSummary : nil, account.usageIsStale ? account.snapshotAgeText : nil),
                     detailLines: [],
                     statusText: account.needsReauth ? "Re-login" : (account.isDisabled ? "Disabled" : nil),
                     statusColorName: account.needsReauth ? "red" : nil,
                     metrics: [
-                        ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization),
-                        ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization),
+                        ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization, isStale: account.usageIsStale),
+                        ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization, isStale: account.usageIsStale),
                     ],
                     isActive: account.matchesActiveKey(activeClaudeKey),
                     isDisabled: account.isDisabled,
@@ -369,7 +391,7 @@ class AppState: ObservableObject {
                     id: account.id,
                     title: account.label,
                     secondaryTexts: [],
-                    detailText: showResetTimes ? account.resetSummary : nil,
+                    detailText: Self.appendingAge(showResetTimes ? account.resetSummary : nil, account.usageIsStale ? account.snapshotAgeText : nil),
                     detailLines: account.switchable == false
                         ? ["Auto-detected workspace from saved Codex token"]
                         : [],
@@ -377,10 +399,10 @@ class AppState: ObservableObject {
                     statusColorName: nil,
                     metrics: [
                         account.fiveHourUsed.map {
-                            ProviderMetric(id: "\(account.id)-5h", label: "5h", value: $0, style: .utilization)
+                            ProviderMetric(id: "\(account.id)-5h", label: "5h", value: $0, style: .utilization, isStale: account.usageIsStale)
                         },
                         account.sevenDayUsed.map {
-                            ProviderMetric(id: "\(account.id)-7d", label: "7d", value: $0, style: .utilization)
+                            ProviderMetric(id: "\(account.id)-7d", label: "7d", value: $0, style: .utilization, isStale: account.usageIsStale)
                         },
                     ].compactMap { $0 },
                     isActive: account.matchesActiveKey(activeCodexKey),
@@ -449,11 +471,11 @@ class AppState: ObservableObject {
         )
     }
 
-    private func loadClaude() {
+    private func loadClaude(force: Bool = false) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             if self.autoSyncClaudeUsage {
-                _ = self.switchService.run(args: ["usage"])
+                _ = self.switchService.run(args: force ? ["usage", "--force"] : ["usage"])
             }
             let store = self.storeService.loadClaudeStore()
             let activeKey = self.storeService.detectActiveClaudeKey()
@@ -466,11 +488,11 @@ class AppState: ObservableObject {
         }
     }
 
-    private func loadCodex() {
+    private func loadCodex(force: Bool = false) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             if self.autoSyncCodexUsage {
-                _ = self.switchService.run(args: ["codex", "sync-usage"])
+                _ = self.switchService.run(args: force ? ["codex", "sync-usage", "--force"] : ["codex", "sync-usage"])
             }
             let store = self.storeService.loadCodexStore()
             let activeKey = self.storeService.detectActiveCodexKey()

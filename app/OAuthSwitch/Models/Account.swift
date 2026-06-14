@@ -22,6 +22,36 @@ struct UsageSnapshot: Codable {
     }
 }
 
+// A snapshot whose fetchedAt is older than this is "stale": the daemon may be
+// backed off from a usage-API 429, so the displayed numbers could be hours old.
+// The UI must visually signal staleness so users don't trust a cached value as
+// the live balance.
+let STALE_THRESHOLD: TimeInterval = 20 * 60
+
+extension UsageSnapshot {
+    // True when there is no fetch timestamp, or the snapshot was fetched more
+    // than STALE_THRESHOLD ago.
+    var isStale: Bool {
+        guard let date = parseISODate(fetchedAt) else { return true }
+        return Date().timeIntervalSince(date) > STALE_THRESHOLD
+    }
+
+    // Compact human age of the snapshot ("12m ago", "3h ago"); nil when fresh
+    // (within STALE_THRESHOLD) or when there is no timestamp.
+    var ageText: String? {
+        guard let date = parseISODate(fetchedAt) else { return nil }
+        let seconds = Date().timeIntervalSince(date)
+        guard seconds > STALE_THRESHOLD else { return nil }
+        if seconds < 3600 {
+            return "\(Int((seconds / 60).rounded()))m ago"
+        }
+        if seconds < 86_400 {
+            return "\(Int((seconds / 3600).rounded()))h ago"
+        }
+        return "\(Int((seconds / 86_400).rounded()))d ago"
+    }
+}
+
 extension UsageSnapshot.Window {
     var resetDate: Date? {
         parseISODate(resets_at)
@@ -112,6 +142,17 @@ struct ClaudeAccount: Codable, Identifiable {
 
     var resetSummary: String? {
         usageSnapshot?.resetSummary
+    }
+
+    // True when the stored snapshot is missing a fetch time or older than
+    // STALE_THRESHOLD: the displayed metrics may be hours-old cached data.
+    var usageIsStale: Bool {
+        usageSnapshot?.isStale ?? true
+    }
+
+    // "12m ago" / "3h ago" when the snapshot is stale, otherwise nil.
+    var snapshotAgeText: String? {
+        usageSnapshot?.ageText
     }
 
     var lowestRemainingPercent: Double? {
@@ -278,6 +319,17 @@ struct CodexAccount: Codable, Identifiable {
 
     var resetSummary: String? {
         usageSnapshot?.resetSummary
+    }
+
+    // True when the stored snapshot is missing a fetch time or older than
+    // STALE_THRESHOLD: the displayed metrics may be hours-old cached data.
+    var usageIsStale: Bool {
+        usageSnapshot?.isStale ?? true
+    }
+
+    // "12m ago" / "3h ago" when the snapshot is stale, otherwise nil.
+    var snapshotAgeText: String? {
+        usageSnapshot?.ageText
     }
 
     var lowestRemainingPercent: Double? {

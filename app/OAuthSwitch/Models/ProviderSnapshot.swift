@@ -112,6 +112,18 @@ struct ProviderMetric: Identifiable {
     let label: String
     let value: Double
     let style: ProviderMetricStyle
+    // When true the snapshot backing this metric is stale (older than
+    // STALE_THRESHOLD): MetricBadge renders it dimmed with a "?" so the value
+    // is not read as the live balance.
+    let isStale: Bool
+
+    init(id: String, label: String, value: Double, style: ProviderMetricStyle, isStale: Bool = false) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.style = style
+        self.isStale = isStale
+    }
 }
 
 struct ProviderRowSnapshot: Identifiable {

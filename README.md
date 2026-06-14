@@ -144,7 +144,7 @@ If all accounts are exhausted, it notifies without switching — unless the curr
 
 **HTTP 429 from the usage API is endpoint throttling, not an account limit.** It means the usage API is throttling this machine's polling — it says nothing about the account's quota and never triggers a switch. When a 429 is received, a per-provider backoff deadline is recorded in `~/.oauth-switch/state.json` and zero usage requests are made for that provider until the deadline passes. The backoff is exponential on consecutive 429s — **15 min → 30 min → 60 min (capped at 1 hour)** — and when the response carries a `retry-after` longer than the computed backoff, the longer value wins (still capped at 1 hour). A successful usage fetch resets the streak.
 
-The same backoff gate applies to the manual usage commands (`oas usage`, `cc-switch usage`, `oas codex sync-usage`) and the account listing: while the deadline is active they make zero usage-API requests and render the cached snapshots, printing `Usage API throttled, showing cached data, next attempt at <time>`. Add `--force` to bypass the gate — a genuinely manual escape hatch; a forced request that hits a 429 records the next (doubled) deadline. The menu bar app's timer-driven refresh never passes `--force`.
+The same backoff gate applies to the manual usage commands (`oas usage`, `cc-switch usage`, `oas codex sync-usage`) and the account listing: while the deadline is active they make zero usage-API requests and render the cached snapshots, printing `Usage API throttled, showing cached data, next attempt at <time>`. Add `--force` to bypass the gate — a genuinely manual escape hatch; a forced request that hits a 429 records the next (doubled) deadline. The menu bar app's timer-driven refresh never passes `--force`, but the explicit **Refresh All** button does (an explicit user refresh always attempts a live fetch, even while throttled).
 
 Both Claude Code and Codex use the same quota-aware target selection: before picking a target, the daemon refreshes usage snapshots and persists them, then picks the viable account with the lowest combined usage (5h weighted 60%, 7d weighted 40%). To keep polling volume low, the **current** account is refreshed every cycle, while **non-current** accounts are eligible for a refetch only when their snapshot is missing or older than 30 minutes — and even then, **at most one non-current account is fetched per cycle**: the one with the oldest snapshot (missing counts as oldest), so the others rotate in on subsequent cycles. Snapshots are deduped per credential (org variants of the same login are fetched once) and fully disabled accounts are never polled. A snapshot older than 2 hours is treated as stale and never counts as viable — stale or unknown accounts are only used as a last resort when the current account is rate-limited.
 
@@ -200,12 +200,13 @@ open /Applications/OAuthSwitch.app
 
 Features:
 - Live usage display for Claude/Codex/Windsurf, with menu bar balance display for the selected provider
-- Background refresh defaults to 15 minutes (configurable in Settings); usage requests honor the 429 backoff gate and the app never bypasses it with `--force`
+- Background refresh defaults to 15 minutes (configurable in Settings); the timer-driven refresh honors the 429 backoff gate and never passes `--force`
+- Staleness indicator: when the active snapshot is older than 20 minutes (the daemon may be backed off from a 429), the metric badges dim and gain a `?`, the row detail appends `· data 3h ago`, and the menu bar balance shows a compact `NN% left ·?` marker so a cached value is never mistaken for the live balance
 - Monochrome provider icons in the menu bar and provider panels
 - Expandable provider panels so large account sets stay accessible in the menu bar window
 - One-click account switching
 - Managed Codex account login from Settings
-- Manual refresh from the menu bar
+- Manual **Refresh All** from the menu bar — an explicit user refresh forces a live fetch even while throttled (passes `--force`)
 - Menu bar warning threshold and balance source configuration in Settings
 - Version footer (`v<version> (<git hash>) <build date>`) in the menu bar window, so you can tell which build is running; `make build` stamps it from `package.json` and git
 

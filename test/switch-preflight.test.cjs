@@ -254,6 +254,36 @@ test('keep-alive: refresh timeout (no statusCode) does NOT mark', async () => {
   assert.equal(store.accounts[2].credentialStatus, undefined);
 });
 
+// --- current-account freshness protection ---------------------------------------
+
+test('refresh: current account is fetched FIRST and is never starved by the non-current budget', async () => {
+  const store = makeStore();
+  // Current account snapshot is fresh; a non-current group has the OLDEST
+  // snapshot so it would win the single non-current slot. The current account
+  // must still be fetched first regardless of its own snapshot freshness.
+  store.accounts[0].usageSnapshot = snapshot(50, 50, freshAt(60 * 1000));
+  store.accounts[1].usageSnapshot = snapshot(10, 10, freshAt(60 * 60 * 1000));
+  store.accounts[2].usageSnapshot = store.accounts[1].usageSnapshot;
+
+  const fetchOrder = [];
+  const fetchUsage = async (token) => {
+    fetchOrder.push(token);
+    return {
+      five_hour: { utilization: 1, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 1, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const { currentUsage } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fetchUsage, {});
+
+  // Current token fetched first.
+  assert.equal(fetchOrder[0], 'cur-token');
+  // Current account always produces a currentUsage result (never skipped).
+  assert.ok(currentUsage);
+  // At most one non-current group fetched per cycle (budget respected).
+  assert.ok(fetchOrder.length <= 2);
+});
+
 // --- auto-switch exclusion -------------------------------------------------------
 
 test('pickBestTarget excludes reauth_required accounts like disabled ones', () => {
