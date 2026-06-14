@@ -157,7 +157,7 @@ struct MenuBarView: View {
 
             HStack(spacing: 8) {
                 Button("Refresh All") {
-                    appState.loadAll()
+                    appState.loadAll(force: true)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
