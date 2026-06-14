@@ -183,10 +183,30 @@ function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
   const now = new Date().toISOString();
   const existingEntry = store.accounts?.find((e) => e.key === key)
     || (legacyKey ? store.accounts?.find((e) => e.key === legacyKey) : null);
+
+  // Guard against capturing a degraded credential. Claude Code rotates tokens
+  // by writing a fresh accessToken to the Keychain, and during that window the
+  // entry can transiently lack a refreshToken. Overwriting our stored snapshot
+  // with that refreshToken-less credential turns a healthy account into a dead
+  // "re-login required" one. When the live credential has no refreshToken but
+  // the existing stored entry does, keep the stored refreshToken while taking
+  // the fresh accessToken/expiresAt.
+  const capturedCredentials = deepCopy(credentials);
+  const liveOauth = capturedCredentials.claudeAiOauth;
+  const existingOauth = existingEntry?.credentials?.claudeAiOauth;
+  const liveHasRefresh = Boolean(normalizeCredentialValue(liveOauth?.refreshToken));
+  const existingHasRefresh = Boolean(normalizeCredentialValue(existingOauth?.refreshToken));
+  if (liveOauth && !liveHasRefresh && existingHasRefresh) {
+    console.error(
+      `[oauth-switch] Live credential for ${key} is missing a refreshToken; preserving the stored refreshToken (likely a transient Keychain state during token rotation).`
+    );
+    liveOauth.refreshToken = existingOauth.refreshToken;
+  }
+
   const snapshot = {
     key,
     metadata: deepCopy(config.oauthAccount),
-    credentials: deepCopy(credentials),
+    credentials: capturedCredentials,
     capturedAt: now,
     lastSyncedAt: now,
     lastUsedAt: existingEntry?.lastUsedAt || undefined,
