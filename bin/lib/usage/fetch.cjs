@@ -50,7 +50,10 @@ function fetchUsage(accessToken, cache) {
 
 // Claude Code's public OAuth client id (same one the Claude Code CLI uses).
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
+// Verified working endpoint: api.anthropic.com returns 200 with a fresh
+// access_token + rotated refresh_token for a valid refresh token. The old
+// console.anthropic.com host returns 404/400 invalid_grant for the same body.
+const OAUTH_TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
 
 function refreshOAuthToken(refreshToken) {
   return new Promise((resolve, reject) => {

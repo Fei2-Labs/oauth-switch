@@ -106,6 +106,10 @@ function isAuthFailure(err) {
   return err?.statusCode === 401 || err?.statusCode === 403;
 }
 
+// Token-endpoint statuses that mean the refresh token is permanently dead and
+// the group needs a manual re-login. 5xx/network/timeout/429 stay transient.
+const REAUTH_STATUS_CODES = new Set([400, 401, 403, 404]);
+
 // Non-current account groups are only refetched when their snapshot is
 // missing or older than this. The current group is refreshed every cycle.
 // Compatible with the 2h viability freshness gate in auto-switch.
@@ -180,8 +184,9 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
           // A 4xx from the OAuth token endpoint means the refreshToken is
           // revoked: the whole credential group needs a manual re-login.
           // Network errors/timeouts are transient and must NOT mark.
-          const status = refreshErr?.statusCode;
-          if (typeof status === 'number' && status >= 400 && status < 500) {
+          // Only 400/401/403/404 = dead refresh token. 5xx, network errors,
+          // timeouts and 429 are transient and must NOT mark reauth_required.
+          if (REAUTH_STATUS_CODES.has(refreshErr?.statusCode)) {
             if (setGroupCredentialStatus(store, group, 'reauth_required', new Date(now).toISOString())) {
               changed = true;
             }

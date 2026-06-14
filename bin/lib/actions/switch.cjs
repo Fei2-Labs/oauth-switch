@@ -10,9 +10,13 @@ const {
 // (or has already expired) are refreshed before they are written live.
 const PREFLIGHT_EXPIRY_MARGIN_MS = 10 * 60 * 1000;
 
+// A definitively dead refresh token: the OAuth token endpoint rejected it with
+// 400 invalid_grant / 401 / 403 / 404. These mark the credential group
+// reauth_required. 5xx, network errors, timeouts (no statusCode) and 429
+// throttling are transient and must NOT mark — the token may still be valid.
+const REAUTH_STATUS_CODES = new Set([400, 401, 403, 404]);
 function isAuthRejection(err) {
-  const status = err?.statusCode;
-  return typeof status === 'number' && status >= 400 && status < 500;
+  return REAUTH_STATUS_CODES.has(err?.statusCode);
 }
 
 // True when the stored accessToken cannot be trusted for a live switch:
