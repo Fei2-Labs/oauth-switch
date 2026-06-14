@@ -460,10 +460,7 @@ struct KiroAccount: Codable, Identifiable {
     }
 
     var isExpired: Bool {
-        guard let exp = auth?.expiresAt else { return false }
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = fmt.date(from: exp) else { return false }
+        guard let date = parseISODate(auth?.expiresAt) else { return false }
         return date < Date()
     }
 }
@@ -681,14 +678,36 @@ private func formatMenuDateTime(_ date: Date) -> String {
 
 private func parseISODate(_ isoString: String?) -> Date? {
     guard let isoString else { return nil }
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = formatter.date(from: isoString) {
+
+    // Fast path: exactly 3 fractional digits (milliseconds), the only
+    // precision ISO8601DateFormatter.withFractionalSeconds accepts.
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractional.date(from: isoString) {
         return date
     }
-    let fallbackFormatter = ISO8601DateFormatter()
-    fallbackFormatter.formatOptions = [.withInternetDateTime]
-    return fallbackFormatter.date(from: isoString)
+
+    // Plain path: no fractional seconds at all.
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    if let date = plain.date(from: isoString) {
+        return date
+    }
+
+    // The usage API emits microsecond precision (6 digits) plus a `+00:00`
+    // offset, e.g. "2026-06-14T08:49:59.285061+00:00". Neither formatter above
+    // accepts arbitrary fractional precision, so strip the fractional part and
+    // retry with the plain (non-fractional) formatter. The truncation loses
+    // sub-second precision, which is irrelevant for reset-time comparisons.
+    let normalized = isoString.replacingOccurrences(
+        of: #"\.\d+"#,
+        with: "",
+        options: .regularExpression
+    )
+    if normalized != isoString, let date = plain.date(from: normalized) {
+        return date
+    }
+    return nil
 }
 
 private func remainingPercent(fromUsed used: Double?) -> Double? {
