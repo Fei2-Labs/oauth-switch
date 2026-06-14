@@ -122,7 +122,7 @@ class AppState: ObservableObject {
         }
 
         guard let percent, !percent.isNaN else { return nil }
-        return "\(Int(percent.rounded()))%"
+        return "\(Int(percent.rounded()))% left"
     }
 
     var isLoading: Bool {
