@@ -141,6 +141,20 @@ function clearGroupCredentialStatus(store, group) {
   return changed;
 }
 
+// True when the entry carries a reauth_required marker that obviously
+// contradicts its own credentials: the stored claudeAiOauth.expiresAt is in the
+// future, so the access token is still valid and the marker is stale. The
+// authoritative clear happens in syncStoreFromLive; this is a display safety net
+// for snapshots written before that fix ran.
+function hasStaleReauthMarker(entry) {
+  if (entry?.credentialStatus !== 'reauth_required') return false;
+  const expiresAt = entry?.credentials?.claudeAiOauth?.expiresAt;
+  if (expiresAt === null || expiresAt === undefined) return false;
+  const expiresMs = typeof expiresAt === 'number' ? expiresAt : Date.parse(expiresAt);
+  if (!Number.isFinite(expiresMs)) return false;
+  return expiresMs > Date.now();
+}
+
 function getDisplayAccounts(store, currentMetadata, currentCredentials) {
   const currentKey = currentMetadata ? getAccountKey(currentMetadata) : null;
   const currentCredentialKey = getClaudeCredentialFingerprint(currentCredentials);
@@ -161,8 +175,16 @@ function getDisplayAccounts(store, currentMetadata, currentCredentials) {
       ? Boolean(currentGroupEntry)
       : (currentKey ? getAccountKey(preferredEntry.entry.metadata) === currentKey : false);
 
+    const entry = preferredEntry.entry;
+    const displayEntry = hasStaleReauthMarker(entry)
+      ? (() => {
+          const { credentialStatus, credentialCheckedAt, ...rest } = entry;
+          return rest;
+        })()
+      : entry;
+
     return {
-      ...preferredEntry.entry,
+      ...displayEntry,
       index: preferredEntry.index,
       current,
       duplicateCount: group.entries.length,
@@ -203,6 +225,13 @@ function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
     liveOauth.refreshToken = existingOauth.refreshToken;
   }
 
+  // Capturing live credentials means the active account just authenticated, so
+  // by definition it does NOT need a re-login. Never carry a pre-existing
+  // reauth_required marker forward onto the freshly captured snapshot: a stale
+  // marker from before the user re-logged in must be cleared here. We rebuild
+  // the snapshot from scratch (only the fields below) and deliberately omit
+  // credentialStatus/credentialCheckedAt so the marker is dropped on both the
+  // existing-entry-update path and the merge-preserve-refreshToken path above.
   const snapshot = {
     key,
     metadata: deepCopy(config.oauthAccount),
@@ -283,6 +312,7 @@ module.exports = {
   clearGroupCredentialStatus,
   normalizeStore,
   getDisplayAccounts,
+  hasStaleReauthMarker,
   syncStoreFromLive,
   findSelection,
   removeStoredAccount,

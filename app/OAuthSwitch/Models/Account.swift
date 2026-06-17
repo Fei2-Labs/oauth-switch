@@ -91,7 +91,11 @@ struct ClaudeAccount: Codable, Identifiable {
     }
 
     var needsReauth: Bool {
-        credentialStatus == "reauth_required"
+        guard credentialStatus == "reauth_required" else { return false }
+        // A stale marker can survive a successful re-login until the next
+        // sync clears it; if the stored token is still valid, the account
+        // does not actually need reauth.
+        return credentials?.claudeAiOauth?.isValidNow != true
     }
 
     var credentialFingerprint: String? {
@@ -187,6 +191,14 @@ struct ClaudeCredentials: Codable {
 struct ClaudeOAuthCredentials: Codable {
     let accessToken: String?
     let refreshToken: String?
+    let expiresAt: Double?
+
+    // True when expiresAt is set and still in the future: the access token is
+    // valid right now. Claude stores expiresAt as epoch milliseconds.
+    var isValidNow: Bool {
+        guard let expiresAt else { return false }
+        return expiresAt > Date().timeIntervalSince1970 * 1000
+    }
 
     var fingerprint: String? {
         let normalizedAccessToken = accessToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

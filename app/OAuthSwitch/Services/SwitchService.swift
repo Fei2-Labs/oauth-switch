@@ -4,8 +4,8 @@ struct SwitchService {
     private static let repoRoot: String = {
         let home = NSHomeDirectory()
         let candidates = [
-            home + "/Dropbox/My Apps/oauth-switch",
             home + "/My Apps/oauth-switch",
+            home + "/Dropbox/My Apps/oauth-switch",
         ]
         return candidates.first {
             FileManager.default.fileExists(atPath: $0 + "/bin/oauth-switch.cjs")
