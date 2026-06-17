@@ -64,10 +64,30 @@ extension UsageSnapshot.Window {
         return resetDate < Date()
     }
 
-    // Reset-aware utilization: a window that already reset counts as 0 used.
-    // Only a network refresh gives better data.
-    var effectiveUtilization: Double? {
-        hasResetInPast ? 0 : utilization
+    // Reset-aware utilization with a freshness guard.
+    //
+    // The reset->0 rule is only honest IMMEDIATELY after a reset. For a STALE
+    // snapshot the real usage is UNKNOWN: the window reset AND may have been
+    // refilled to 100%, so fabricating 0% hides a maxed account. Apply the
+    // reset->0 zeroing ONLY when the snapshot is fresh; a stale snapshot returns
+    // the RAW last-known utilization (the UI already flags it with "?"/age).
+    func effectiveUtilization(snapshotIsFresh: Bool) -> Double? {
+        (snapshotIsFresh && hasResetInPast) ? 0 : utilization
+    }
+}
+
+extension UsageSnapshot {
+    // Whether this snapshot is fresh enough to trust its reset-aware reasoning.
+    var isFresh: Bool {
+        !isStale
+    }
+
+    var fiveHourEffectiveUtilization: Double? {
+        five_hour?.effectiveUtilization(snapshotIsFresh: isFresh)
+    }
+
+    var sevenDayEffectiveUtilization: Double? {
+        seven_day?.effectiveUtilization(snapshotIsFresh: isFresh)
     }
 }
 
@@ -127,21 +147,22 @@ struct ClaudeAccount: Codable, Identifiable {
     }
 
     var fiveHourUsed: Double {
-        usageSnapshot?.five_hour?.effectiveUtilization ?? 0
+        usageSnapshot?.fiveHourEffectiveUtilization ?? 0
     }
 
     var sevenDayUsed: Double {
-        usageSnapshot?.seven_day?.effectiveUtilization ?? 0
+        usageSnapshot?.sevenDayEffectiveUtilization ?? 0
     }
 
-    // True when the stored window already reset: the displayed 0% is an
-    // estimate, not fetched data.
+    // True when a FRESH snapshot's window already reset: the displayed 0% is a
+    // just-reset estimate. A stale window does NOT zero, so it isn't flagged
+    // here (the snapshot-level stale "?" marker covers it instead).
     var fiveHourIsStale: Bool {
-        usageSnapshot?.five_hour?.hasResetInPast == true
+        usageSnapshot?.isFresh == true && usageSnapshot?.five_hour?.hasResetInPast == true
     }
 
     var sevenDayIsStale: Bool {
-        usageSnapshot?.seven_day?.hasResetInPast == true
+        usageSnapshot?.isFresh == true && usageSnapshot?.seven_day?.hasResetInPast == true
     }
 
     var resetSummary: String? {
@@ -165,11 +186,11 @@ struct ClaudeAccount: Codable, Identifiable {
     }
 
     private var fiveHourRemainingPercent: Double? {
-        remainingPercent(fromUsed: usageSnapshot?.five_hour?.effectiveUtilization)
+        remainingPercent(fromUsed: usageSnapshot?.fiveHourEffectiveUtilization)
     }
 
     private var sevenDayRemainingPercent: Double? {
-        remainingPercent(fromUsed: usageSnapshot?.seven_day?.effectiveUtilization)
+        remainingPercent(fromUsed: usageSnapshot?.sevenDayEffectiveUtilization)
     }
 }
 
@@ -312,21 +333,22 @@ struct CodexAccount: Codable, Identifiable {
     }
 
     var fiveHourUsed: Double? {
-        usageSnapshot?.five_hour?.effectiveUtilization
+        usageSnapshot?.fiveHourEffectiveUtilization
     }
 
     var sevenDayUsed: Double? {
-        usageSnapshot?.seven_day?.effectiveUtilization
+        usageSnapshot?.sevenDayEffectiveUtilization
     }
 
-    // True when the stored window already reset: the displayed 0% is an
-    // estimate, not fetched data.
+    // True when a FRESH snapshot's window already reset: the displayed 0% is a
+    // just-reset estimate. A stale window does NOT zero, so it isn't flagged
+    // here (the snapshot-level stale "?" marker covers it instead).
     var fiveHourIsStale: Bool {
-        usageSnapshot?.five_hour?.hasResetInPast == true
+        usageSnapshot?.isFresh == true && usageSnapshot?.five_hour?.hasResetInPast == true
     }
 
     var sevenDayIsStale: Bool {
-        usageSnapshot?.seven_day?.hasResetInPast == true
+        usageSnapshot?.isFresh == true && usageSnapshot?.seven_day?.hasResetInPast == true
     }
 
     var resetSummary: String? {

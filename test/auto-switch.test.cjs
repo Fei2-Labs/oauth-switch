@@ -37,7 +37,12 @@ const {
   runAutoSwitchClaude,
   runAutoSwitchCodex,
 } = require('../bin/lib/actions/auto-switch.cjs');
-const { refreshStoredUsageSnapshots, NONCURRENT_REFRESH_MS } = require('../bin/lib/usage/format.cjs');
+const {
+  refreshStoredUsageSnapshots,
+  NONCURRENT_REFRESH_MS,
+  effectiveWindowUtilization,
+  STALE_THRESHOLD_MS,
+} = require('../bin/lib/usage/format.cjs');
 const stateStore = require('../bin/lib/store/state.cjs');
 const { runSwitchAction } = require('../bin/lib/actions/switch.cjs');
 const { getAccountKey } = require('../bin/lib/store/accounts.cjs');
@@ -773,6 +778,64 @@ test('refreshStoredUsageSnapshots aborts remaining fetches on api_throttled and 
 });
 
 // --- Stale-window (past resets_at) scoring ----------------------------------
+
+// A window's reset->0 zeroing is only honest immediately after a reset. A
+// stale snapshot's window may have been refilled to 100%, so its value is
+// UNKNOWN and effectiveWindowUtilization must NOT fabricate 0%.
+test('effectiveWindowUtilization: fresh + past reset -> 0', () => {
+  const now = Date.now();
+  const window = { utilization: 100, resets_at: new Date(now - 60 * 1000).toISOString() };
+  const fetchedAt = new Date(now - 60 * 1000).toISOString(); // fresh
+  assert.equal(effectiveWindowUtilization(window, fetchedAt, now), 0);
+});
+
+test('effectiveWindowUtilization: stale + past reset -> raw value (not 0)', () => {
+  const now = Date.now();
+  const window = { utilization: 100, resets_at: new Date(now - 60 * 1000).toISOString() };
+  const fetchedAt = new Date(now - STALE_THRESHOLD_MS - 60 * 1000).toISOString(); // stale
+  assert.equal(effectiveWindowUtilization(window, fetchedAt, now), 100);
+});
+
+test('effectiveWindowUtilization: fresh + future reset -> raw value', () => {
+  const now = Date.now();
+  const window = { utilization: 42, resets_at: new Date(now + 3600 * 1000).toISOString() };
+  const fetchedAt = new Date(now - 60 * 1000).toISOString(); // fresh
+  assert.equal(effectiveWindowUtilization(window, fetchedAt, now), 42);
+});
+
+test('effectiveWindowUtilization: stale + future reset -> raw value', () => {
+  const now = Date.now();
+  const window = { utilization: 42, resets_at: new Date(now + 3600 * 1000).toISOString() };
+  const fetchedAt = new Date(now - STALE_THRESHOLD_MS - 60 * 1000).toISOString(); // stale
+  assert.equal(effectiveWindowUtilization(window, fetchedAt, now), 42);
+});
+
+test('effectiveWindowUtilization: missing fetchedAt is treated as stale (no zeroing)', () => {
+  const now = Date.now();
+  const window = { utilization: 100, resets_at: new Date(now - 60 * 1000).toISOString() };
+  assert.equal(effectiveWindowUtilization(window, undefined, now), 100);
+});
+
+test('getScore on a STALE past-reset snapshot uses raw value, not a fabricated 0', () => {
+  // info@swedexpress.com case: a 3-day-old snapshot whose reset times passed.
+  // Real usage is 100% (maxed); reset-aware must NOT fabricate 0%.
+  const staleAt = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+  const staleSnapshot = {
+    five_hour: { utilization: 100, resets_at: freshAt(60 * 1000) },
+    seven_day: { utilization: 100, resets_at: freshAt(60 * 1000) },
+    fetchedAt: staleAt,
+  };
+  const accounts = [
+    { key: 'a', current: true, usageSnapshot: snapshot(95, 95) },
+    { key: 'b', usageSnapshot: staleSnapshot },
+    { key: 'c', usageSnapshot: snapshot(70, 85) },
+  ];
+  const { target, forced } = pickBestTarget(accounts, 'a');
+  // b scores from raw 100/100 (stale, not zeroed), so c (70/85) wins the
+  // forced path. The stale account is NOT treated as freshly reset/empty.
+  assert.equal(forced, true);
+  assert.equal(target.key, 'c');
+});
 
 test('getScore treats a window with past resets_at as reset (0 utilization)', () => {
   // Both windows reset in the past: stored 100% utilization is obsolete.

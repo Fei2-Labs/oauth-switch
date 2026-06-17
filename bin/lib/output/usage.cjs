@@ -113,10 +113,12 @@ function getUsageColumns(entry, getRateLimitResetAt) {
   const usage = entry.usageSnapshot || {};
   const rateLimitReset = entry.current ? getRateLimitResetAt() : null;
   // Windows whose resets_at already passed have reset since the snapshot was
-  // taken: render them as fully available (formatDurationUntil shows "now").
-  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour));
+  // taken: render a FRESH one as fully available (formatDurationUntil shows
+  // "now"). A STALE snapshot's value is unknown, so effectiveWindowUtilization
+  // returns the raw last-known utilization instead of fabricating 0%.
+  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour, usage.fetchedAt));
   const fiveHourReset = formatDurationUntil(usage.five_hour?.resets_at);
-  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day));
+  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day, usage.fetchedAt));
   const sevenDayReset = formatDurationUntil(rateLimitReset || usage.seven_day?.resets_at);
   return `5H:${fiveHourPct} (${fiveHourReset}) | 7D:${sevenDayPct} (${sevenDayReset})`;
 }

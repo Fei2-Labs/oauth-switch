@@ -86,19 +86,42 @@ function shouldKeepExistingSnapshot(existingSnapshot, nextSnapshot, isCurrentAcc
   return false;
 }
 
+// A snapshot whose fetchedAt is older than this (or missing) is "stale": the
+// daemon may be backed off from a usage-API 429, so the stored numbers could
+// be hours old. Mirrors the app's STALE_THRESHOLD (20 minutes).
+const STALE_THRESHOLD_MS = 20 * 60 * 1000;
+
+// True when the snapshot is fresh enough to trust its reset-aware reasoning.
+// A missing/unparseable fetchedAt counts as stale.
+function isSnapshotFresh(fetchedAt, now = Date.now()) {
+  if (!fetchedAt) return false;
+  const ms = new Date(fetchedAt).getTime();
+  if (Number.isNaN(ms)) return false;
+  return now - ms <= STALE_THRESHOLD_MS;
+}
+
 // A usage window whose resets_at is already in the past HAS reset since the
-// snapshot was taken: its stored utilization is obsolete. For display and
-// scoring it counts as 0 (the window restarted); callers can use
-// isWindowReset to mark the value as an estimate.
+// snapshot was taken: its stored utilization is obsolete.
 function isWindowReset(window, now = Date.now()) {
   if (!window || !window.resets_at) return false;
   const resetAt = new Date(window.resets_at).getTime();
   return !Number.isNaN(resetAt) && resetAt <= now;
 }
 
-function effectiveWindowUtilization(window, now = Date.now()) {
+// Reset-aware utilization with a freshness guard.
+//
+// The reset->0 rule is only honest IMMEDIATELY after a reset. For a STALE
+// snapshot the real usage is UNKNOWN: the window reset AND may have been
+// refilled to 100%, so fabricating 0% hides a maxed account. Therefore the
+// reset->0 zeroing is applied ONLY when the snapshot is fresh; a stale snapshot
+// returns the RAW last-known utilization unchanged (the caller already flags it
+// stale with a "?"/age marker).
+//
+// `fetchedAt` is the parent snapshot's fetch timestamp. When omitted the
+// snapshot is treated as stale (no zeroing).
+function effectiveWindowUtilization(window, fetchedAt, now = Date.now()) {
   if (!window) return undefined;
-  if (isWindowReset(window, now)) return 0;
+  if (isSnapshotFresh(fetchedAt, now) && isWindowReset(window, now)) return 0;
   return window.utilization;
 }
 
@@ -365,9 +388,9 @@ function getUsageColumns(entry, getRateLimitResetAt, resetWindowDays) {
   const rateLimitReset = entry.current ? getRateLimitResetAt() : null;
   // Windows whose resets_at already passed have reset since the snapshot was
   // taken: render them as 0% used (formatDurationUntil shows "now").
-  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour));
+  const fiveHourPct = formatUsagePercent(effectiveWindowUtilization(usage.five_hour, usage.fetchedAt));
   const fiveHourReset = formatDurationUntil(usage.five_hour?.resets_at);
-  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day));
+  const sevenDayPct = formatUsagePercent(effectiveWindowUtilization(usage.seven_day, usage.fetchedAt));
   const sevenDayReset = formatDurationUntil(rateLimitReset || usage.seven_day?.resets_at) || formatResetEstimate(entry.lastSyncedAt, entry.current ? entry.key : null, getRateLimitResetAt, resetWindowDays);
   return `5H:${fiveHourPct}(${fiveHourReset}) | 7D:${sevenDayPct} (${sevenDayReset})`;
 }
@@ -383,6 +406,7 @@ module.exports = {
   isSnapshotFresherThan,
   isWindowReset,
   effectiveWindowUtilization,
+  STALE_THRESHOLD_MS,
   formatUsagePercent,
   formatDurationUntil,
   formatResetEstimate,

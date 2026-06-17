@@ -102,10 +102,12 @@ function pickBestTarget(accounts, currentKey, pickOptions = {}) {
 
 function getScore(snapshot) {
   // Reset-aware: a window whose resets_at already passed HAS reset since the
-  // snapshot was taken, so it scores as 0 utilization. The 2h freshness gate
-  // for viability is unaffected — this only improves the score fallback.
-  const fiveH = effectiveWindowUtilization(snapshot?.five_hour) ?? 100;
-  const sevenD = effectiveWindowUtilization(snapshot?.seven_day) ?? 100;
+  // snapshot was taken, so it scores as 0 utilization — but ONLY when the
+  // snapshot is fresh. A stale snapshot's reset window may have been refilled
+  // to 100%, so it scores from the RAW last-known value (effectiveWindowUtilization
+  // gates the zeroing on snapshot freshness). The 2h viability gate is unaffected.
+  const fiveH = effectiveWindowUtilization(snapshot?.five_hour, snapshot?.fetchedAt) ?? 100;
+  const sevenD = effectiveWindowUtilization(snapshot?.seven_day, snapshot?.fetchedAt) ?? 100;
   return fiveH * 0.6 + sevenD * 0.4;
 }
 
