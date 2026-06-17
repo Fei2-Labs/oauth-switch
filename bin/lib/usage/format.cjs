@@ -115,6 +115,30 @@ const REAUTH_STATUS_CODES = new Set([400, 401, 403, 404]);
 // Compatible with the 2h viability freshness gate in auto-switch.
 const NONCURRENT_REFRESH_MS = 30 * 60 * 1000;
 
+// Approach gate: non-current account groups are ONLY polled when the CURRENT
+// account is nearing its switch trigger (5h>=80 or 7d>=90). While the current
+// account has headroom there is no reason to poll targets, so steady-state
+// volume drops to ~1 usage request per cycle (just the current account). These
+// thresholds sit ~20 points BELOW the triggers (matching the existing
+// target5h/target7d viability bar) so target snapshots start warming a few
+// cycles before a switch becomes likely — by the time the current account
+// crosses the trigger, viable targets already have fresh (<2h) snapshots.
+const APPROACH_5H = 60; // == THRESHOLDS.target5h
+const APPROACH_7D = 70; // just below trigger7d (90), within the warm-up band
+
+// True when the current account's just-fetched usage means we should warm
+// non-current target snapshots this cycle: it is rate_limited, or either
+// window is within the approach band of its trigger.
+function isApproachingTrigger(usage) {
+  if (!usage || usage.api_throttled) return false;
+  if (usage.rate_limited) return true;
+  const fiveH = usage.five_hour?.utilization;
+  const sevenD = usage.seven_day?.utilization;
+  if (typeof fiveH === 'number' && fiveH >= APPROACH_5H) return true;
+  if (typeof sevenD === 'number' && sevenD >= APPROACH_7D) return true;
+  return false;
+}
+
 function isSnapshotFresherThan(snapshot, maxAgeMs, now = Date.now()) {
   if (!snapshot || !snapshot.fetchedAt) return false;
   const fetched = new Date(snapshot.fetchedAt).getTime();
@@ -160,9 +184,35 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
     })
     .sort((a, b) => snapshotFetchedAtMs(pickGroupRepresentative(a)?.usageSnapshot)
       - snapshotFetchedAtMs(pickGroupRepresentative(b)?.usageSnapshot));
-  const orderedGroups = [...groups.filter(hasCurrent), ...eligibleNonCurrent.slice(0, 1)];
 
-  for (const group of orderedGroups) {
+  // Approach-gated polling: the current group is always processed first, then
+  // its result decides whether to spend the single non-current slot this cycle.
+  // While the current account is below the approach band the round-robin is
+  // skipped entirely, so steady-state volume is ~1 request/cycle.
+  const currentGroups = groups.filter(hasCurrent);
+  const orderedGroups = [...currentGroups];
+  const currentGroupCount = currentGroups.length;
+  let nonCurrentAppended = false;
+  // null until the current group decision is made: true => warm targets this
+  // cycle, false => skip them (current account has headroom).
+  let approachAllowsNonCurrent = currentGroupCount === 0 ? true : null;
+
+  // Append the single non-current slot exactly once, after the current
+  // group(s) settle the approach decision. When the store has no current
+  // group (e.g. the active account isn't pooled) we always allow it so
+  // keep-alive reauth detection and stale-snapshot refresh still run.
+  const maybeAppendNonCurrent = () => {
+    if (nonCurrentAppended || approachAllowsNonCurrent !== true) return;
+    nonCurrentAppended = true;
+    orderedGroups.push(...eligibleNonCurrent.slice(0, 1));
+  };
+
+  // When the store has no current group at all, the approach decision is moot:
+  // append the non-current slot up front so keep-alive/stale refresh still run.
+  if (currentGroupCount === 0) maybeAppendNonCurrent();
+
+  for (let i = 0; i < orderedGroups.length; i += 1) {
+    const group = orderedGroups[i];
     const representative = pickGroupRepresentative(group);
     const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
@@ -216,6 +266,15 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
       }
       if (groupHasCurrent) {
         currentUsage = usage;
+        // Approach gate: warm non-current target snapshots this cycle only when
+        // the current account is nearing its trigger (or rate-limited). With
+        // headroom, skip the round-robin entirely (~1 request/cycle steady
+        // state). An api_throttled current response leaves the decision to the
+        // abort path below (skip the rest, as today).
+        if (approachAllowsNonCurrent === null && !usage?.api_throttled) {
+          approachAllowsNonCurrent = isApproachingTrigger(usage);
+          maybeAppendNonCurrent();
+        }
       }
       if (usage?.api_throttled) {
         // Endpoint throttling of this machine: abort all remaining fetches
@@ -238,7 +297,14 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
         }
       }
     } catch {
-      // Keep previous snapshot on failure (token may be revoked).
+      // Keep previous snapshot on failure (token may be revoked). If the
+      // CURRENT group failed we couldn't read its usage to assess approach;
+      // fall back to allowing the non-current slot so keep-alive reauth
+      // detection and stale-snapshot refresh still run for the pool.
+      if (groupHasCurrent && approachAllowsNonCurrent === null) {
+        approachAllowsNonCurrent = true;
+        maybeAppendNonCurrent();
+      }
     }
   }
   return { currentUsage, changed, apiThrottled };
@@ -311,6 +377,9 @@ module.exports = {
   toUsageSnapshot,
   refreshStoredUsageSnapshots,
   NONCURRENT_REFRESH_MS,
+  APPROACH_5H,
+  APPROACH_7D,
+  isApproachingTrigger,
   isSnapshotFresherThan,
   isWindowReset,
   effectiveWindowUtilization,

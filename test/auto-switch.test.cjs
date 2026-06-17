@@ -546,6 +546,14 @@ test('refreshStoredUsageSnapshots fetches current first, skips fresh non-current
   const calls = [];
   const fakeFetch = async (token) => {
     calls.push(token);
+    // Current account is approaching its trigger (5h>=60), so non-current
+    // target snapshots are warmed this cycle.
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 65, resets_at: freshAt(-3600000) },
+        seven_day: { utilization: 42, resets_at: freshAt(-86400000) },
+      };
+    }
     return {
       five_hour: { utilization: 42, resets_at: freshAt(-3600000) },
       seven_day: { utilization: 42, resets_at: freshAt(-86400000) },
@@ -557,7 +565,7 @@ test('refreshStoredUsageSnapshots fetches current first, skips fresh non-current
   // Current group first (despite being last in the store), fresh and
   // all-disabled non-current groups skipped entirely.
   assert.deepEqual(calls, ['cur-token', 'stale-token']);
-  assert.equal(currentUsage.five_hour.utilization, 42);
+  assert.equal(currentUsage.five_hour.utilization, 65);
   assert.equal(apiThrottled, null);
 });
 
@@ -579,6 +587,13 @@ test('refreshStoredUsageSnapshots fetches only the oldest of several stale non-c
   const calls = [];
   const fakeFetch = async (token) => {
     calls.push(token);
+    // Current account approaching trigger: warm one non-current target.
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 65, resets_at: freshAt(-3600000) },
+        seven_day: { utilization: 42, resets_at: freshAt(-86400000) },
+      };
+    }
     return {
       five_hour: { utilization: 42, resets_at: freshAt(-3600000) },
       seven_day: { utilization: 42, resets_at: freshAt(-86400000) },
@@ -593,6 +608,123 @@ test('refreshStoredUsageSnapshots fetches only the oldest of several stale non-c
   assert.equal(store.accounts[2].usageSnapshot.five_hour.utilization, 42);
   assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // waits for a future cycle
   assert.equal(store.accounts[3].usageSnapshot.five_hour.utilization, 10);
+});
+
+// --- Approach-gated non-current polling ----------------------------------------
+
+function approachStore() {
+  const makeAccount = (name, snap) => ({
+    key: `uuid:${name}`,
+    metadata: { accountUuid: name, emailAddress: `${name}@example.com` },
+    credentials: { claudeAiOauth: { accessToken: `${name}-token` } },
+    ...(snap ? { usageSnapshot: snap } : {}),
+  });
+  return {
+    accounts: [
+      makeAccount('cur', snapshot(50, 50, freshAt(60 * 1000))),
+      makeAccount('stale', snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000))),
+    ],
+  };
+}
+
+test('approach gate: current below threshold fetches ZERO non-current accounts', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    // 5h 40 < 60, 7d 50 < 70: plenty of headroom, no target warming needed.
+    return {
+      five_hour: { utilization: 40, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 50, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const { currentUsage, apiThrottled } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  // Only the current account is fetched; the stale non-current group waits.
+  assert.deepEqual(calls, ['cur-token']);
+  assert.equal(currentUsage.five_hour.utilization, 40);
+  assert.equal(apiThrottled, null);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // untouched
+});
+
+test('approach gate: current at the 5h approach threshold warms one non-current', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 60, resets_at: freshAt(-3600000) }, // == APPROACH_5H
+        seven_day: { utilization: 10, resets_at: freshAt(-86400000) },
+      };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  assert.deepEqual(calls, ['cur-token', 'stale-token']);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 5); // refreshed
+});
+
+test('approach gate: current 7d above approach threshold warms one non-current', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 10, resets_at: freshAt(-3600000) },
+        seven_day: { utilization: 75, resets_at: freshAt(-86400000) }, // > APPROACH_7D
+      };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  assert.deepEqual(calls, ['cur-token', 'stale-token']);
+});
+
+test('approach gate: rate_limited current warms one non-current even with low utilization', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return { rate_limited: true, five_hour: { utilization: 5 }, seven_day: { utilization: 5 } };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  assert.deepEqual(calls, ['cur-token', 'stale-token']);
+});
+
+test('approach gate: current fetch throttled skips non-current entirely', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    return { api_throttled: true, retry_after: 300 };
+  };
+
+  const { apiThrottled } = await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch);
+
+  assert.deepEqual(calls, ['cur-token']); // aborts before any non-current fetch
+  assert.deepEqual(apiThrottled, { retryAfter: 300 });
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // untouched
 });
 
 test('refreshStoredUsageSnapshots aborts remaining fetches on api_throttled and keeps old snapshots', async () => {
