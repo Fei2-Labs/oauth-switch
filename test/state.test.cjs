@@ -16,6 +16,8 @@ const {
   recordAutoSwitch,
   getLastAutoSwitch,
   clearAutoSwitchCooldown,
+  getLastNonCurrentFetchAt,
+  setLastNonCurrentFetchAt,
 } = require('../bin/lib/store/state.cjs');
 
 function tmpStatePath() {
@@ -148,6 +150,39 @@ test('state writes for one provider preserve the other provider entries', () => 
 
   assert.equal(getProviderThrottleUntil('claude', now, statePath), now + 1200 * 1000);
   assert.equal(getLastAutoSwitch('codex', statePath).toKey, 'account:y');
+});
+
+test('getLastNonCurrentFetchAt: missing/corrupt -> 0, roundtrips a recorded timestamp', () => {
+  const statePath = tmpStatePath();
+  assert.equal(getLastNonCurrentFetchAt('claude', statePath), 0); // never recorded
+
+  const now = Date.now();
+  setLastNonCurrentFetchAt('claude', now, statePath);
+  assert.equal(getLastNonCurrentFetchAt('claude', statePath), now);
+  assert.equal(getLastNonCurrentFetchAt('codex', statePath), 0); // per provider
+
+  fs.writeFileSync(statePath, 'not json{{{', 'utf8');
+  assert.equal(getLastNonCurrentFetchAt('claude', statePath), 0); // corrupt -> 0
+});
+
+test('setLastNonCurrentFetchAt preserves throttle/lastAutoSwitch state', () => {
+  const statePath = tmpStatePath();
+  const now = Date.now();
+  setProviderThrottle('claude', 1200, now, statePath);
+  recordAutoSwitch('claude', 'uuid:a', 'uuid:b', now, statePath);
+
+  setLastNonCurrentFetchAt('claude', now, statePath);
+  assert.equal(getLastNonCurrentFetchAt('claude', statePath), now);
+  assert.equal(getProviderThrottleUntil('claude', now, statePath), now + 1200 * 1000);
+  assert.equal(getLastAutoSwitch('claude', statePath).toKey, 'uuid:b');
+});
+
+test('setLastNonCurrentFetchAt write failures are swallowed', () => {
+  const statePath = tmpStatePath();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, '{}', 'utf8');
+  const impossible = path.join(statePath, 'sub', 'state.json');
+  assert.doesNotThrow(() => setLastNonCurrentFetchAt('claude', Date.now(), impossible));
 });
 
 test('write failures are swallowed', () => {

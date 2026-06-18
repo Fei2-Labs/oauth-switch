@@ -11,7 +11,12 @@ const THRESHOLDS = {
 const { getDisplayAccounts } = require('../store/accounts.cjs');
 const { logEvent, formatLine } = require('../log.cjs');
 const state = require('../store/state.cjs');
-const { NONCURRENT_REFRESH_MS, isSnapshotFresherThan, effectiveWindowUtilization } = require('../usage/format.cjs');
+const {
+  NONCURRENT_REFRESH_MS,
+  NON_CURRENT_MIN_INTERVAL_MS,
+  isSnapshotFresherThan,
+  effectiveWindowUtilization,
+} = require('../usage/format.cjs');
 
 const { AUTO_SWITCH_COOLDOWN_MS, SWITCHED_FROM_EXCLUDE_MS } = state;
 
@@ -176,6 +181,14 @@ function toCodexUsageSnapshot(usage, fetchedAt = new Date().toISOString()) {
 // Returns { changed, apiThrottled }.
 async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetchUsageFn = fetchCodexUsage, now = Date.now()) {
   const { getCodexCredentialFingerprint } = require('../providers/codex-identity.cjs');
+  // Non-current warming is rate-limited to once per 15 min so a chronically
+  // high-usage active account doesn't poll a non-current group every cycle and
+  // trip the usage-endpoint rate limit. EXCEPTION: a genuinely rate_limited
+  // current account must switch NOW, so it bypasses the interval.
+  const currentRateLimited = currentUsage?.rate_limited === true;
+  const lastNonCurrentFetchAt = state.getLastNonCurrentFetchAt('codex');
+  const intervalElapsed = now - lastNonCurrentFetchAt >= NON_CURRENT_MIN_INTERVAL_MS;
+  const allowNonCurrent = currentRateLimited || intervalElapsed;
   const usageByFingerprint = new Map();
   const currentFingerprint = currentAuth ? getCodexCredentialFingerprint(currentAuth) : null;
   if (currentFingerprint && currentUsage) {
@@ -210,10 +223,13 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
     fetchCandidates.push({ fingerprint, newestMs });
   }
   fetchCandidates.sort((a, b) => a.newestMs - b.newestMs);
-  const allowedFetchFingerprint = fetchCandidates.length > 0 ? fetchCandidates[0].fingerprint : null;
+  const allowedFetchFingerprint = allowNonCurrent && fetchCandidates.length > 0
+    ? fetchCandidates[0].fingerprint
+    : null;
 
   let changed = false;
   let apiThrottled = null;
+  let nonCurrentFetched = false;
   const nowIso = new Date(now).toISOString();
   for (const [index, entry] of (store.accounts || []).entries()) {
     const accessToken = entry?.auth?.tokens?.access_token;
@@ -221,6 +237,7 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
     const fingerprint = fingerprintOf(entry);
     if (!usageByFingerprint.has(fingerprint)) {
       if (fingerprint !== allowedFetchFingerprint) continue;
+      nonCurrentFetched = true;
       try {
         const fetched = await fetchUsageFn(accessToken);
         if (fetched?.api_throttled) {
@@ -245,6 +262,9 @@ async function refreshCodexUsageSnapshots(store, currentAuth, currentUsage, fetc
       changed = true;
     }
   }
+  // Record the 15-min interval only when a non-current group was actually
+  // fetched, so the next ~15 min skip the warm (unless rate_limited bypasses).
+  if (nonCurrentFetched) state.setLastNonCurrentFetchAt('codex', now);
   return { changed, apiThrottled };
 }
 

@@ -1,4 +1,4 @@
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
@@ -26,6 +26,13 @@ function freshStatePath() {
   return p;
 }
 
+// Every test starts from a clean (non-existent) state file so persisted
+// throttle/cooldown/lastNonCurrentFetchAt values from one test never leak into
+// the next. Tests that need pre-seeded state set it after this hook runs.
+beforeEach(() => {
+  freshStatePath();
+});
+
 const {
   pickBestTarget,
   pickBestCodexTarget,
@@ -40,6 +47,7 @@ const {
 const {
   refreshStoredUsageSnapshots,
   NONCURRENT_REFRESH_MS,
+  NON_CURRENT_MIN_INTERVAL_MS,
   effectiveWindowUtilization,
   STALE_THRESHOLD_MS,
 } = require('../bin/lib/usage/format.cjs');
@@ -732,6 +740,121 @@ test('approach gate: current fetch throttled skips non-current entirely', async 
   assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // untouched
 });
 
+// --- 15-min non-current refresh interval ----------------------------------------
+
+// Inject the per-provider interval timestamp so these tests never touch the
+// real state.json and stay deterministic regardless of wall clock.
+function intervalOptions(lastNonCurrentFetchAt) {
+  const recorded = [];
+  return {
+    options: {
+      getLastNonCurrentFetchAt: () => lastNonCurrentFetchAt,
+      setLastNonCurrentFetchAt: (_provider, at) => recorded.push(at),
+    },
+    recorded,
+  };
+}
+
+test('15-min interval: approaching + last non-current fetch <15min ago fetches ONLY the current account', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+        seven_day: { utilization: 75, resets_at: freshAt(-86400000) }, // > APPROACH_7D
+      };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const now = Date.now();
+  const { options, recorded } = intervalOptions(now - (NON_CURRENT_MIN_INTERVAL_MS - 60 * 1000)); // 14 min ago
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch, { ...options, now });
+
+  // Approaching, but the 15-min interval has not elapsed: skip the warm.
+  assert.deepEqual(calls, ['cur-token']);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // untouched
+  assert.deepEqual(recorded, []); // no non-current fetch => no timestamp write
+});
+
+test('15-min interval: approaching + last non-current fetch >15min ago warms one and records the timestamp', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return {
+        five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+        seven_day: { utilization: 75, resets_at: freshAt(-86400000) }, // > APPROACH_7D
+      };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const now = Date.now();
+  const { options, recorded } = intervalOptions(now - (NON_CURRENT_MIN_INTERVAL_MS + 60 * 1000)); // 16 min ago
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch, { ...options, now });
+
+  assert.deepEqual(calls, ['cur-token', 'stale-token']);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 5); // refreshed
+  assert.deepEqual(recorded, [now]); // interval timestamp recorded for this cycle
+});
+
+test('15-min interval: rate_limited current warms one non-current REGARDLESS of the interval', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    if (token === 'cur-token') {
+      return { rate_limited: true, five_hour: { utilization: 5 }, seven_day: { utilization: 5 } };
+    }
+    return {
+      five_hour: { utilization: 5, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 5, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const now = Date.now();
+  // Last non-current fetch was 1 min ago — well inside the 15-min interval.
+  const { options, recorded } = intervalOptions(now - 60 * 1000);
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch, { ...options, now });
+
+  // rate_limited bypasses the interval: warm the target NOW for the switch.
+  assert.deepEqual(calls, ['cur-token', 'stale-token']);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 5); // refreshed
+  assert.deepEqual(recorded, [now]);
+});
+
+test('15-min interval: current below approach band never fetches non-current (interval irrelevant)', async () => {
+  const store = approachStore();
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    // Plenty of headroom: 5h 40 < 60, 7d 50 < 70.
+    return {
+      five_hour: { utilization: 40, resets_at: freshAt(-3600000) },
+      seven_day: { utilization: 50, resets_at: freshAt(-86400000) },
+    };
+  };
+
+  const now = Date.now();
+  // Interval long elapsed, but the current account isn't approaching.
+  const { options, recorded } = intervalOptions(0);
+  await refreshStoredUsageSnapshots(store, 'uuid:cur', fakeFetch, { ...options, now });
+
+  assert.deepEqual(calls, ['cur-token']);
+  assert.equal(store.accounts[1].usageSnapshot.five_hour.utilization, 10); // untouched
+  assert.deepEqual(recorded, []);
+});
+
 test('refreshStoredUsageSnapshots aborts remaining fetches on api_throttled and keeps old snapshots', async () => {
   const oldSnapshotB = snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000));
   const store = {
@@ -1057,6 +1180,58 @@ test('refreshCodexUsageSnapshots skips fresh non-current credentials and all-dis
 
   assert.deepEqual(calls, ['tok-stale']);
   assert.equal(apiThrottled, null);
+});
+
+test('refreshCodexUsageSnapshots: a non-current fetch within 15 min of the last warm is skipped', async () => {
+  const now = Date.now();
+  stateStore.setLastNonCurrentFetchAt('codex', now - 60 * 1000); // 1 min ago
+  const store = {
+    accounts: [
+      {
+        key: 'stale',
+        auth: { tokens: { access_token: 'tok-stale', id_token: 'id-stale' } },
+        usageSnapshot: snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000)),
+      },
+    ],
+  };
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    return { five_hour_percent: 12, weekly_percent: 34 };
+  };
+
+  // currentUsage null => not rate_limited, so the 15-min interval applies.
+  const { changed } = await refreshCodexUsageSnapshots(store, null, null, fakeFetch, now);
+
+  assert.deepEqual(calls, []); // interval not elapsed: zero non-current fetches
+  assert.equal(changed, false);
+  assert.equal(store.accounts[0].usageSnapshot.five_hour.utilization, 10); // untouched
+});
+
+test('refreshCodexUsageSnapshots: rate_limited current bypasses the 15-min interval and records it', async () => {
+  const now = Date.now();
+  stateStore.setLastNonCurrentFetchAt('codex', now - 60 * 1000); // 1 min ago
+  const store = {
+    accounts: [
+      {
+        key: 'stale',
+        auth: { tokens: { access_token: 'tok-stale', id_token: 'id-stale' } },
+        usageSnapshot: snapshot(10, 10, freshAt(NONCURRENT_REFRESH_MS + 60 * 1000)),
+      },
+    ],
+  };
+  const calls = [];
+  const fakeFetch = async (token) => {
+    calls.push(token);
+    return { five_hour_percent: 12, weekly_percent: 34 };
+  };
+
+  const { changed } = await refreshCodexUsageSnapshots(store, null, { rate_limited: true }, fakeFetch, now);
+
+  assert.deepEqual(calls, ['tok-stale']); // rate_limited bypasses the interval
+  assert.equal(changed, true);
+  // The bypassing fetch still records the interval for subsequent cycles.
+  assert.equal(stateStore.getLastNonCurrentFetchAt('codex'), now);
 });
 
 test('refreshCodexUsageSnapshots aborts remaining fetches on api_throttled and keeps old snapshots', async () => {

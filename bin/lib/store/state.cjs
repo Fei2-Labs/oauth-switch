@@ -111,6 +111,26 @@ function resetProviderThrottle(provider, statePath = getStatePath()) {
   }, statePath);
 }
 
+// Timestamp (ms epoch) of the last NON-CURRENT account usage fetch for the
+// provider, or 0 when never recorded / corrupt. Used to rate-limit how often
+// the daemon warms non-current target snapshots (at most once per 15 min)
+// while the current account merely approaches its trigger.
+function getLastNonCurrentFetchAt(provider, statePath = getStatePath()) {
+  const entry = getProviderState(readState(statePath), provider);
+  if (!entry.lastNonCurrentFetchAt) return 0;
+  const ms = new Date(entry.lastNonCurrentFetchAt).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+// Records that a non-current account usage fetch happened at `at` (ms epoch).
+// Writes are swallowed so state persistence can never break a refresh.
+function setLastNonCurrentFetchAt(provider, at = Date.now(), statePath = getStatePath()) {
+  updateProviderState(provider, (entry) => {
+    entry.lastNonCurrentFetchAt = new Date(at).toISOString();
+    return entry;
+  }, statePath);
+}
+
 // Records a daemon-initiated switch for the anti-ping-pong cooldown.
 function recordAutoSwitch(provider, fromKey, toKey, now = Date.now(), statePath = getStatePath()) {
   updateProviderState(provider, (entry) => {
@@ -152,6 +172,8 @@ module.exports = {
   getProviderThrottleStreak,
   setProviderThrottle,
   resetProviderThrottle,
+  getLastNonCurrentFetchAt,
+  setLastNonCurrentFetchAt,
   recordAutoSwitch,
   getLastAutoSwitch,
   clearAutoSwitchCooldown,

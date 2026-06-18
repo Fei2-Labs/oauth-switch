@@ -3,6 +3,10 @@ const {
   setGroupCredentialStatus,
   clearGroupCredentialStatus,
 } = require('../store/accounts.cjs');
+const {
+  getLastNonCurrentFetchAt,
+  setLastNonCurrentFetchAt,
+} = require('../store/state.cjs');
 
 function formatUsageInfo(usage) {
   const lines = [];
@@ -149,6 +153,16 @@ const NONCURRENT_REFRESH_MS = 30 * 60 * 1000;
 const APPROACH_5H = 60; // == THRESHOLDS.target5h
 const APPROACH_7D = 70; // just below trigger7d (90), within the warm-up band
 
+// Even within the approach band, the daemon warms non-current target snapshots
+// at MOST once per this interval. A chronically-approaching active account
+// (e.g. 7d ~74-81% for hours) would otherwise poll a non-current group EVERY
+// 5-min cycle, keeping request volume high and tripping the usage-endpoint rate
+// limit. The current account is still fetched every cycle (trigger detection).
+// EXCEPTION: when the current account is genuinely rate_limited (429 on the
+// active account => switch NOW), this interval is bypassed so targets refresh
+// immediately for the imminent switch.
+const NON_CURRENT_MIN_INTERVAL_MS = 15 * 60 * 1000;
+
 // True when the current account's just-fetched usage means we should warm
 // non-current target snapshots this cycle: it is rate_limited, or either
 // window is within the approach band of its trigger.
@@ -183,6 +197,11 @@ function snapshotFetchedAtMs(snapshot) {
 async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, options = {}) {
   const refreshOAuthToken = options.refreshOAuthToken || require('./fetch.cjs').refreshOAuthToken;
   const now = options.now ?? Date.now();
+  const provider = options.provider || 'claude';
+  // Test/sandbox hooks default to the real state helpers; overridable so tests
+  // can inject the interval timestamp without writing the on-disk state.json.
+  const getLastNonCurrent = options.getLastNonCurrentFetchAt || getLastNonCurrentFetchAt;
+  const setLastNonCurrent = options.setLastNonCurrentFetchAt || setLastNonCurrentFetchAt;
   let currentUsage = null;
   let changed = false;
   // null, or { retryAfter } when the usage endpoint throttled this machine.
@@ -219,27 +238,49 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
   // null until the current group decision is made: true => warm targets this
   // cycle, false => skip them (current account has headroom).
   let approachAllowsNonCurrent = currentGroupCount === 0 ? true : null;
+  // True when the current account is genuinely rate_limited (429) and must
+  // switch NOW. In that case the 15-min non-current interval is BYPASSED so
+  // targets refresh immediately for the imminent switch.
+  let currentRateLimited = false;
+
+  // Per-provider 15-min throttle on non-current warming: even within the
+  // approach band, a chronically-approaching active account would otherwise
+  // poll a non-current group every cycle. Bypassed when the current account is
+  // genuinely rate_limited (handled at the append site).
+  const lastNonCurrentFetchAt = getLastNonCurrent(provider);
+  const intervalElapsed = now - lastNonCurrentFetchAt >= NON_CURRENT_MIN_INTERVAL_MS;
 
   // Append the single non-current slot exactly once, after the current
   // group(s) settle the approach decision. When the store has no current
   // group (e.g. the active account isn't pooled) we always allow it so
   // keep-alive reauth detection and stale-snapshot refresh still run.
-  const maybeAppendNonCurrent = () => {
+  // `bypassInterval` skips the 15-min throttle: set for the rate_limited
+  // active-switch case and for the no-current-group keep-alive path (which must
+  // keep running every cycle for reauth detection / stale-snapshot refresh).
+  const maybeAppendNonCurrent = (bypassInterval = false) => {
     if (nonCurrentAppended || approachAllowsNonCurrent !== true) return;
+    // Rate-limit the non-current warm to once per 15 min while merely
+    // approaching; bypass it only when the current account is rate_limited.
+    if (!intervalElapsed && !bypassInterval && !currentRateLimited) return;
     nonCurrentAppended = true;
     orderedGroups.push(...eligibleNonCurrent.slice(0, 1));
   };
 
   // When the store has no current group at all, the approach decision is moot:
   // append the non-current slot up front so keep-alive/stale refresh still run.
-  if (currentGroupCount === 0) maybeAppendNonCurrent();
+  // This keep-alive path is exempt from the 15-min interval.
+  if (currentGroupCount === 0) maybeAppendNonCurrent(true);
 
+  // Set when a non-current group is actually fetched this cycle; persists the
+  // interval timestamp once after the loop so the next ~15 min skip the warm.
+  let nonCurrentFetched = false;
   for (let i = 0; i < orderedGroups.length; i += 1) {
     const group = orderedGroups[i];
     const representative = pickGroupRepresentative(group);
     const accessToken = representative?.credentials?.claudeAiOauth?.accessToken;
     if (!accessToken) continue;
     const groupHasCurrent = hasCurrent(group);
+    if (!groupHasCurrent) nonCurrentFetched = true;
     try {
       let usage;
       try {
@@ -295,6 +336,7 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
         // state). An api_throttled current response leaves the decision to the
         // abort path below (skip the rest, as today).
         if (approachAllowsNonCurrent === null && !usage?.api_throttled) {
+          currentRateLimited = usage?.rate_limited === true;
           approachAllowsNonCurrent = isApproachingTrigger(usage);
           maybeAppendNonCurrent();
         }
@@ -326,10 +368,16 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
       // detection and stale-snapshot refresh still run for the pool.
       if (groupHasCurrent && approachAllowsNonCurrent === null) {
         approachAllowsNonCurrent = true;
-        maybeAppendNonCurrent();
+        // Current usage was unreadable: this is the keep-alive/stale-refresh
+        // fallback, not the chronically-approaching steady state, so it is
+        // exempt from the 15-min interval.
+        maybeAppendNonCurrent(true);
       }
     }
   }
+  // Record the interval only when a non-current group was actually fetched so
+  // the next ~15 min skip the warm (unless the current account is rate_limited).
+  if (nonCurrentFetched) setLastNonCurrent(provider, now);
   return { currentUsage, changed, apiThrottled };
 }
 
@@ -400,6 +448,7 @@ module.exports = {
   toUsageSnapshot,
   refreshStoredUsageSnapshots,
   NONCURRENT_REFRESH_MS,
+  NON_CURRENT_MIN_INTERVAL_MS,
   APPROACH_5H,
   APPROACH_7D,
   isApproachingTrigger,
