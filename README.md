@@ -123,11 +123,24 @@ oas log
 # Sync current account into store
 oas sync
 
+# Update to the latest published version (runs `npm install -g oauth-switch@latest`)
+oas update
+
 # Print the CLI version
 oas --version
 ```
 
 Accounts are captured automatically from local OAuth token files, oauth-switch backup snapshots, and managed Codex homes. Log in with different accounts and run `oas` (or `oas kiro` / `oas codex`) each time. For Codex, run `oas codex add` to create an isolated managed `CODEX_HOME` and keep that account available without replacing the global `~/.codex/auth.json`. Use `oas alias`, `oas kiro alias`, or `oas codex alias` to give accounts memorable names.
+
+---
+
+## Updating
+
+`oas --version` (also `oas -v` / `cc-switch -v`) prints the installed version.
+
+`oas update` (or `cc-switch update`) self-updates by running `npm install -g oauth-switch@latest` and streaming npm's output. On success it prints the new version and reminds you to restart the menu bar app / re-run the command. If npm isn't on your PATH it prints the exact manual command, and on a permission error (`EACCES`) it suggests either `sudo npm install -g oauth-switch@latest` or fixing your npm global prefix — npm's real error is never swallowed.
+
+**Auto update-check.** Interactive commands (the default account list, `oas usage`, `cc-switch usage` / list) print a single non-intrusive line when a newer version is published: `Update available: <current> -> <latest>. Run: oas update`. The check is cached in `~/.oauth-switch/update-check.json` and hits the npm registry at most once every 24 hours, with a short 3-second timeout that fails silently — it never blocks or errors a command when you're offline or the registry is down. The `auto` daemon path never runs the check (no per-cycle network calls). Set `OAUTH_SWITCH_NO_UPDATE_CHECK=1` to disable the check entirely.
 
 ---
 

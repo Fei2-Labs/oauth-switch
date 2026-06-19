@@ -15,6 +15,7 @@ const removeAction = require('./lib/actions/remove.cjs');
 const listAction = require('./lib/actions/list.cjs');
 const switchAction = require('./lib/actions/switch.cjs');
 const switchLog = require('./lib/log.cjs');
+const updateLib = require('./lib/update.cjs');
 
 const {
   getDefaultConfigPath,
@@ -197,6 +198,12 @@ async function main() {
     return;
   }
 
+  if (rawArgs[0] === 'update') {
+    const code = await updateLib.runSelfUpdate();
+    if (code !== 0) process.exitCode = code;
+    return;
+  }
+
   // Only the first arg, so an account named "log" can still be selected later.
   if (rawArgs[0] === 'log') {
     const lines = switchLog.readRecentLines(50);
@@ -218,6 +225,7 @@ async function main() {
     const existingStore = normalizeStore(readJsonIfExists(options.storePath, { version: STORE_VERSION, accounts: [] }), STORE_VERSION);
 
     if (options.usageOnly) {
+      await maybeNotifyUpdate();
       const syncedForUsage = syncStoreFromLive(existingStore, config, credentials, deepCopy, STORE_VERSION);
       await runUsageAction({
         store: syncedForUsage.store,
@@ -299,6 +307,7 @@ async function main() {
     const accounts = getDisplayAccounts(store, config.oauthAccount, credentials);
 
     if (!options.selector) {
+      await maybeNotifyUpdate();
       await runListAction({
         synced,
         store,
@@ -355,6 +364,14 @@ async function main() {
     }
     process.exitCode = 1;
   }
+}
+
+// Non-intrusive update-check for interactive commands only (list / usage).
+// Cheap (cached, at most one registry hit per 24h) and fails silently.
+async function maybeNotifyUpdate() {
+  await updateLib.maybePrintUpdateNotice({
+    currentVersion: require('../package.json').version,
+  });
 }
 
 main();
