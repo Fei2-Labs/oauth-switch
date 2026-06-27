@@ -10,5 +10,11 @@ let package = Package(
             path: "OAuthSwitch",
             resources: [.process("Resources")]
         ),
+        .testTarget(
+            name: "OAuthSwitchTests",
+            dependencies: ["OAuthSwitch"],
+            path: "Tests/OAuthSwitchTests",
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )
