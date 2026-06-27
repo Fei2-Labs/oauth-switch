@@ -361,7 +361,7 @@ class AppState: ObservableObject {
                     detailLines: [],
                     statusText: account.needsReauth ? "Re-login" : (account.isDisabled ? "Disabled" : nil),
                     statusColorName: account.needsReauth ? "red" : nil,
-                    metrics: [
+                    metrics: account.needsReauth ? [] : [
                         ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization, isStale: account.usageIsStale),
                         ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization, isStale: account.usageIsStale),
                     ],
