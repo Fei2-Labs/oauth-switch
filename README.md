@@ -219,9 +219,26 @@ Features:
 - Expandable provider panels so large account sets stay accessible in the menu bar window
 - One-click account switching
 - Managed Codex account login from Settings
+- **Capture current browser Claude session** from Settings — imports the browser's claude.ai cookie so non-active accounts' usage can be read without burning their OAuth token (see [Non-active Claude usage via browser cookie](#non-active-claude-usage-via-browser-cookie))
 - Manual **Refresh All** from the menu bar — an explicit user refresh forces a live fetch even while throttled (passes `--force`)
 - Menu bar warning threshold and balance source configuration in Settings
 - Version footer (`v<version> (<git hash>) <build date>`) in the menu bar window, so you can tell which build is running; `make build` stamps it from `package.json` and git
+
+### Non-active Claude usage via browser cookie
+
+> macOS-only, menu bar app only. Firefox (and Zen) for now.
+
+Claude OAuth refresh tokens **rotate**: each refresh invalidates the previous one. Refreshing a non-active account's token just to display its usage can race Claude Code (or another machine) and return `400 invalid_grant`, which would wrongly mark the account **Re-login**. To avoid that churn, the menu bar app can read a **non-active** account's session/weekly usage from the claude.ai web API using your browser's `sessionKey` cookie instead of touching its OAuth token.
+
+How it works:
+
+1. Log into each account in Firefox once, then click **Capture current browser Claude session** in Settings. The app reads the browser's current claude.ai `sessionKey`, calls `GET /api/account` to identify whose session it is, matches it to a stored account by email, and caches the cookie per account in `~/.oauth-switch/cookies.json` (file mode `0600`, kept out of any synced store because the cookie is a secret). A session that matches no stored account is refused, not saved.
+2. On each refresh cycle (at most once every 15 minutes), every non-active account that has a cached cookie has its usage fetched via the web API (URLSession). The fresh snapshot is shown immediately and persisted to the Claude store through the CLI (`oas claude set-usage-snapshot`), so Node remains the single writer of the store.
+3. For those cookie-backed accounts, the daemon **stops refreshing their OAuth token** entirely — no rotation, no `invalid_grant`, no false re-login. Accounts without a cookie keep the existing OAuth behavior.
+
+Cookie failures never touch OAuth: an expired/invalid cookie (HTTP 401/403) keeps the last usage snapshot on screen and shows a distinct orange **Cookie expired — re-import** status (vs the red **Re-login** OAuth state). Re-capture the browser session to clear it. The **active** account is always read from the live Keychain as before and is never served from a cookie.
+
+> The web call must be made by the macOS app: claude.ai sits behind Cloudflare's TLS/JS-fingerprint challenge, which blocks plain Node/`curl` (403) but passes from `URLSession`. This is why the cookie path is macOS-app-only; the cross-platform CLI keeps OAuth-based usage everywhere.
 
 ---
 
@@ -242,6 +259,9 @@ Features:
 ~/.ClaudeCodeMultiAccounts.json  ← oauth-switch store (Claude)
 ~/.CodexMultiAccounts.json       ← oauth-switch store (Codex)
 ~/.KiroMultiAccounts.json        ← oauth-switch store (Kiro)
+
+# Per-account claude.ai cookies for the web-usage path (macOS app, mode 0600)
+~/.oauth-switch/cookies.json     ← captured browser sessionKeys (secret, not synced)
 ```
 
 `oauth-switch` snapshots each account's credentials when you use it. Switching replaces the live config files with the stored snapshot and refreshes the token. Restart the CLI/IDE for changes to take effect.
@@ -272,7 +292,8 @@ oauth-switch/
 │   ├── oauth-switch.cjs          # Main CLI entry
 │   └── lib/
 │       ├── actions/              # list, switch, sync, auto-switch
-│       ├── providers/codex.cjs   # Codex provider
+│       ├── providers/            # codex, kiro, windsurf, claude subcommands
+│       ├── cookies/              # claude.ai cookie cache reader (web-usage path)
 │       ├── store/                # IO, account management
 │       ├── output/               # Formatting, messages
 │       └── usage/                # Fetch, cache, format usage data

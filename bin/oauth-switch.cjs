@@ -4,6 +4,7 @@ const path = require('path');
 const { runCodex } = require('./lib/providers/codex.cjs');
 const { runKiro } = require('./lib/providers/kiro.cjs');
 const { runWindsurf } = require('./lib/providers/windsurf.cjs');
+const { runClaude } = require('./lib/providers/claude.cjs');
 const storeIo = require('./lib/store/io.cjs');
 const storeAccounts = require('./lib/store/accounts.cjs');
 const { withStoreLock } = require('./lib/store/lock.cjs');
@@ -230,6 +231,15 @@ async function main() {
   const windsurfIdx = rawArgs.indexOf('windsurf');
   if (windsurfIdx >= 0) {
     runWindsurf(rawArgs.slice(windsurfIdx + 1));
+    return;
+  }
+
+  // `oas claude <sub>` — Claude-specific subcommands (currently just
+  // set-usage-snapshot, the app's single-writer seam for cookie usage). It
+  // takes its own store lock, so it runs before the locked main() block below.
+  const claudeIdx = rawArgs.indexOf('claude');
+  if (claudeIdx >= 0) {
+    await runClaude(rawArgs.slice(claudeIdx + 1));
     return;
   }
 

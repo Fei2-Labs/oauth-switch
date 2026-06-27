@@ -28,6 +28,10 @@ class AppState: ObservableObject {
     // Status line for the "Capture current browser Claude session" action.
     @Published var cookieCaptureMessage: String?
     @Published var isCapturingCookie: Bool = false
+    // Store keys of non-active Claude accounts whose cached cookie was rejected
+    // (401/403) on the last web-usage refresh. Surfaced as a DISTINCT
+    // "Cookie expired — re-import" row state, never the OAuth "Re-login" state.
+    @Published var cookieExpiredClaudeKeys: Set<String> = []
     @Published var loadingProviders: Set<ProviderID> = Set(ProviderID.allCases)
     // Default 15 minutes: the timer-driven refresh shells out to `usage` /
     // `codex sync-usage`, and anything more frequent risks usage-API 429
@@ -79,6 +83,13 @@ class AppState: ObservableObject {
     private var windsurfLoadGeneration = 0
     private let storeService = StoreService()
     private let switchService = SwitchService()
+    private let cookieUsageRefresher = CookieUsageRefreshService()
+    // Cookie-based web usage for non-active accounts is refreshed at most once
+    // per this interval (mirrors the daemon's conservative non-current cadence),
+    // so frequent reloads/switches don't hammer claude.ai. A forced refresh
+    // ("Refresh All") bypasses it.
+    private static let cookieRefreshMinInterval: TimeInterval = 15 * 60
+    private var lastCookieUsageRefreshAt: Date?
 
     var providerSections: [ProviderSectionSnapshot] {
         [
@@ -372,14 +383,19 @@ class AppState: ObservableObject {
         return ProviderSectionSnapshot(
             id: .claude,
             rows: accounts.map { account in
-                ProviderRowSnapshot(
+                // Cookie expiry is a COOKIE failure, not an OAuth failure: it
+                // shows a distinct orange "Cookie expired — re-import" status
+                // (vs the red "Re-login" reauth state) and KEEPS the last
+                // snapshot's metrics. needsReauth takes precedence if both set.
+                let cookieExpired = !account.needsReauth && cookieExpiredClaudeKeys.contains(account.key)
+                return ProviderRowSnapshot(
                     id: account.id,
                     title: account.displayName,
                     secondaryTexts: [account.metadata?.planType].compactMap { $0 },
                     detailText: Self.appendingAge(showResetTimes ? account.resetSummary : nil, account.usageIsStale ? account.snapshotAgeText : nil),
                     detailLines: [],
-                    statusText: account.needsReauth ? "Re-login" : (account.isDisabled ? "Disabled" : nil),
-                    statusColorName: account.needsReauth ? "red" : nil,
+                    statusText: account.needsReauth ? "Re-login" : (cookieExpired ? "Cookie expired — re-import" : (account.isDisabled ? "Disabled" : nil)),
+                    statusColorName: account.needsReauth ? "red" : (cookieExpired ? "orange" : nil),
                     metrics: account.needsReauth ? [] : [
                         ProviderMetric(id: "\(account.id)-5h", label: "5h", value: account.fiveHourUsed, style: .utilization, isStale: account.usageIsStale),
                         ProviderMetric(id: "\(account.id)-7d", label: "7d", value: account.sevenDayUsed, style: .utilization, isStale: account.usageIsStale),
@@ -494,17 +510,53 @@ class AppState: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             if self.autoSyncClaudeUsage {
+                // The Node `usage` refresh now SKIPS cookie-backed non-active
+                // accounts (it won't touch their rotating OAuth token); the
+                // cookie pass below populates their usage via the web API.
                 _ = self.switchService.run(args: force ? ["usage", "--force"] : ["usage"])
             }
             let store = self.storeService.loadClaudeStore()
             let activeKey = self.storeService.detectActiveClaudeKey()
-            let deduplicatedAccounts = Self.deduplicatedClaudeAccounts(store.accounts, preferredKey: activeKey)
+            var accounts = Self.deduplicatedClaudeAccounts(store.accounts, preferredKey: activeKey)
+
+            // Cookie/web-usage pass for non-active accounts (macOS Firefox path).
+            // Rate-limited to once per cookieRefreshMinInterval unless forced.
+            let runCookieRefresh = self.autoSyncClaudeUsage && (force || self.shouldRunCookieRefresh())
+            var cookieOutcome = CookieUsageRefreshService.Outcome.empty
+            if runCookieRefresh {
+                let snapshotAccounts = accounts
+                let refresher = self.cookieUsageRefresher
+                let semaphore = DispatchSemaphore(value: 0)
+                Task {
+                    cookieOutcome = await refresher.refresh(accounts: snapshotAccounts, activeKey: activeKey)
+                    semaphore.signal()
+                }
+                semaphore.wait()
+                accounts = Self.applyingCookieSnapshots(accounts, cookieOutcome.updated)
+            }
+
             DispatchQueue.main.async {
-                self.claudeAccounts = deduplicatedAccounts
+                self.claudeAccounts = accounts
                 self.activeClaudeKey = activeKey
+                if runCookieRefresh {
+                    self.lastCookieUsageRefreshAt = Date()
+                    var expired = self.cookieExpiredClaudeKeys
+                    // A successful refresh clears any prior expired flag; a fresh
+                    // 401/403 sets it. Both keep the last snapshot on screen.
+                    for item in cookieOutcome.updated { expired.remove(item.key) }
+                    expired.formUnion(cookieOutcome.cookieExpiredKeys)
+                    // Drop flags for accounts that no longer exist.
+                    let liveKeys = Set(accounts.map(\.key))
+                    self.cookieExpiredClaudeKeys = expired.intersection(liveKeys)
+                }
                 self.finishLoading(.claude)
             }
         }
+    }
+
+    private func shouldRunCookieRefresh(now: Date = Date()) -> Bool {
+        guard let last = lastCookieUsageRefreshAt else { return true }
+        return now.timeIntervalSince(last) >= Self.cookieRefreshMinInterval
     }
 
     private func loadCodex(force: Bool = false) {
@@ -575,6 +627,21 @@ class AppState: ObservableObject {
 }
 
 private extension AppState {
+    // Overlays cookie-sourced snapshots onto the matching in-memory accounts so
+    // the menu shows the fresh web-API usage immediately (the Node store write
+    // happens in parallel via the CLI seam).
+    static func applyingCookieSnapshots(
+        _ accounts: [ClaudeAccount],
+        _ updates: [(key: String, snapshot: UsageSnapshot)]
+    ) -> [ClaudeAccount] {
+        guard !updates.isEmpty else { return accounts }
+        let snapshotsByKey = Dictionary(updates.map { ($0.key, $0.snapshot) }, uniquingKeysWith: { _, new in new })
+        return accounts.map { account in
+            guard let snapshot = snapshotsByKey[account.key] else { return account }
+            return account.withUsageSnapshot(snapshot)
+        }
+    }
+
     static func deduplicatedClaudeAccounts(_ accounts: [ClaudeAccount], preferredKey: String?) -> [ClaudeAccount] {
         var groupedAccounts: [String: [ClaudeAccount]] = [:]
         var groupOrder: [String] = []
@@ -628,6 +695,21 @@ private extension ClaudeAccount {
     func matchesActiveKey(_ activeKey: String?) -> Bool {
         guard let activeKey else { return false }
         return key == activeKey || canonicalKey == activeKey
+    }
+
+    // Returns a copy with a replaced usage snapshot (ClaudeAccount's stored
+    // properties are immutable, so the cookie pass rebuilds the value).
+    func withUsageSnapshot(_ snapshot: UsageSnapshot) -> ClaudeAccount {
+        ClaudeAccount(
+            key: key,
+            metadata: metadata,
+            credentials: credentials,
+            capturedAt: capturedAt,
+            lastUsedAt: lastUsedAt,
+            usageSnapshot: snapshot,
+            disabled: disabled,
+            credentialStatus: credentialStatus
+        )
     }
 }
 

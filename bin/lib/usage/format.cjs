@@ -202,6 +202,17 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
   // can inject the interval timestamp without writing the on-disk state.json.
   const getLastNonCurrent = options.getLastNonCurrentFetchAt || getLastNonCurrentFetchAt;
   const setLastNonCurrent = options.setLastNonCurrentFetchAt || setLastNonCurrentFetchAt;
+  // Per-account claude.ai cookie cache (written by the macOS app). NON-current
+  // groups whose account has a usable cookie are refreshed via the web API in
+  // the app, so the daemon must NOT touch their ROTATING OAuth refresh token
+  // here — that refresh is the source of the 400 invalid_grant churn this
+  // feature removes. Injectable for tests; missing/corrupt cache -> {} (no
+  // behavior change). The current/active account is never affected.
+  const loadCookieCache = options.loadCookieCache || require('../cookies/cache.cjs').loadCookieCache;
+  const cookieCache = loadCookieCache();
+  const groupHasCookie = (group) => group.entries.some(
+    ({ entry }) => entry && entry.key && cookieCache[entry.key]
+  );
   let currentUsage = null;
   let changed = false;
   // null, or { retryAfter } when the usage endpoint throttled this machine.
@@ -218,6 +229,9 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
   // snapshots are never refetched, so neither consumes the single slot.
   const eligibleNonCurrent = groups
     .filter((g) => !hasCurrent(g))
+    // Cookie-backed non-current groups are served by the app's web-API path;
+    // never spend an OAuth fetch/refresh on them (avoids invalid_grant churn).
+    .filter((group) => !groupHasCookie(group))
     .filter((group) => {
       const representative = pickGroupRepresentative(group);
       if (!representative?.credentials?.claudeAiOauth?.accessToken) return false;

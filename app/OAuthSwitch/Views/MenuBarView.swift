@@ -331,6 +331,8 @@ private extension ProviderRowSnapshot {
         switch statusColorName {
         case "red":
             return .red
+        case "orange":
+            return .orange
         default:
             return .secondary
         }
