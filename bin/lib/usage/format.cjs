@@ -142,14 +142,13 @@ const REAUTH_STATUS_CODES = new Set([400, 401, 403, 404]);
 // Compatible with the 2h viability freshness gate in auto-switch.
 const NONCURRENT_REFRESH_MS = 30 * 60 * 1000;
 
-// Approach gate: non-current account groups are ONLY polled when the CURRENT
-// account is nearing its switch trigger (5h>=80 or 7d>=90). While the current
-// account has headroom there is no reason to poll targets, so steady-state
-// volume drops to ~1 usage request per cycle (just the current account). These
-// thresholds sit ~20 points BELOW the triggers (matching the existing
-// target5h/target7d viability bar) so target snapshots start warming a few
-// cycles before a switch becomes likely — by the time the current account
-// crosses the trigger, viable targets already have fresh (<2h) snapshots.
+// Retained for API stability and possible reuse. The approach gate that once
+// limited non-current polling to "current account nearing its trigger" has been
+// REMOVED: it froze non-active balances in the menubar whenever the active
+// account had headroom. Non-current warming is now bounded solely by the
+// round-robin one-slot-per-cycle budget and the 15-min interval below, so
+// volume is unchanged but balances stay fresh. isApproachingTrigger is no
+// longer consulted by refreshStoredUsageSnapshots.
 const APPROACH_5H = 60; // == THRESHOLDS.target5h
 const APPROACH_7D = 70; // just below trigger7d (90), within the warm-up band
 
@@ -241,16 +240,19 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
     .sort((a, b) => snapshotFetchedAtMs(pickGroupRepresentative(a)?.usageSnapshot)
       - snapshotFetchedAtMs(pickGroupRepresentative(b)?.usageSnapshot));
 
-  // Approach-gated polling: the current group is always processed first, then
-  // its result decides whether to spend the single non-current slot this cycle.
-  // While the current account is below the approach band the round-robin is
-  // skipped entirely, so steady-state volume is ~1 request/cycle.
+  // The current group is always processed first; its result then settles
+  // currentRateLimited (a genuine active-account 429 bypasses the 15-min
+  // interval) before the single non-current slot is appended. Non-current
+  // warming is NOT gated on the current account's headroom — it runs on the
+  // round-robin every cycle, bounded only by the one-slot budget and the
+  // 15-min interval below.
   const currentGroups = groups.filter(hasCurrent);
   const orderedGroups = [...currentGroups];
   const currentGroupCount = currentGroups.length;
   let nonCurrentAppended = false;
-  // null until the current group decision is made: true => warm targets this
-  // cycle, false => skip them (current account has headroom).
+  // null until the current group is fetched: sequences the single append so it
+  // runs AFTER currentRateLimited is known. The approach gate is removed, so a
+  // normal current fetch always resolves this to `true` (never false).
   let approachAllowsNonCurrent = currentGroupCount === 0 ? true : null;
   // True when the current account is genuinely rate_limited (429) and must
   // switch NOW. In that case the 15-min non-current interval is BYPASSED so
@@ -344,14 +346,18 @@ async function refreshStoredUsageSnapshots(store, currentKey, fetchUsage, option
       }
       if (groupHasCurrent) {
         currentUsage = usage;
-        // Approach gate: warm non-current target snapshots this cycle only when
-        // the current account is nearing its trigger (or rate-limited). With
-        // headroom, skip the round-robin entirely (~1 request/cycle steady
-        // state). An api_throttled current response leaves the decision to the
-        // abort path below (skip the rest, as today).
+        // Non-current target snapshots warm on the gentle round-robin every
+        // cycle, regardless of the current account's headroom — the approach
+        // gate was removed so non-active balances stay fresh. Volume is still
+        // bounded: at most ONE non-current group per cycle and at most once per
+        // NON_CURRENT_MIN_INTERVAL_MS (both enforced in maybeAppendNonCurrent).
+        // We still read the active account's rate_limited flag: a genuine 429
+        // there means "switch NOW", which bypasses that interval so targets
+        // refresh immediately. An api_throttled current response leaves the
+        // decision to the abort path below (skip the rest, as today).
         if (approachAllowsNonCurrent === null && !usage?.api_throttled) {
           currentRateLimited = usage?.rate_limited === true;
-          approachAllowsNonCurrent = isApproachingTrigger(usage);
+          approachAllowsNonCurrent = true;
           maybeAppendNonCurrent();
         }
       }
