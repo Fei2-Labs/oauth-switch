@@ -6,6 +6,7 @@ const { runKiro } = require('./lib/providers/kiro.cjs');
 const { runWindsurf } = require('./lib/providers/windsurf.cjs');
 const storeIo = require('./lib/store/io.cjs');
 const storeAccounts = require('./lib/store/accounts.cjs');
+const { withStoreLock } = require('./lib/store/lock.cjs');
 const usageCache = require('./lib/usage/cache.cjs');
 const usageFetch = require('./lib/usage/fetch.cjs');
 const usageFormat = require('./lib/usage/format.cjs');
@@ -247,6 +248,13 @@ async function main() {
   const options = parseArgs(rawArgs);
 
   try {
+    // Serialize every Claude-store critical section (read -> mutate -> write,
+    // including OAuth refresh) behind one cross-process lock. The menu bar runs
+    // `oas usage` on a timer concurrently with user-triggered `oas <selector>`
+    // switches; without this both refresh the SAME rotating refresh token and
+    // the loser gets 400 invalid_grant. The codex/kiro/windsurf branches return
+    // earlier (separate stores) and are intentionally not locked here.
+    await withStoreLock('claude-store', async () => {
     const config = readJson(options.configPath);
     const credentials = readCredentials(options.credentialsPath);
     const existingStore = normalizeStore(readJsonIfExists(options.storePath, { version: STORE_VERSION, accounts: [] }), STORE_VERSION);
@@ -383,6 +391,11 @@ async function main() {
       }),
       RESET_WINDOW_DAYS,
       getRateLimitResetAt,
+      // Deps for the rotating-token recovery retry in ensureSwitchableCredentials.
+      readJsonIfExists,
+      normalizeStore,
+      storeVersion: STORE_VERSION,
+    });
     });
   } catch (error) {
     // Pre-flight blocks print their own first-line explanation already.

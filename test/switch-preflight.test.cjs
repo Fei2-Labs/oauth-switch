@@ -168,6 +168,80 @@ test('preflight: refresh 400 blocks the switch, marks the group, no live write',
   assert.equal(store.accounts[0].credentialStatus, undefined);
 });
 
+test('preflight: 400 on a stale token recovers by retrying the newer on-disk token', async () => {
+  const fs = require('node:fs');
+  const { normalizeStore } = require('../bin/lib/store/accounts.cjs');
+  const { readJsonIfExists } = require('../bin/lib/store/io.cjs');
+
+  const store = makeStore({ bExpiresAt: Date.now() - 1000 });
+  // A concurrent switch / Claude Code rotated a NEWER token onto disk for the
+  // b group while our in-memory `selected` still holds the stale 'b-refresh'.
+  const onDisk = makeStore({ bExpiresAt: Date.now() - 1000 });
+  onDisk.accounts[1].credentials.claudeAiOauth.refreshToken = 'b-refresh-ROTATED';
+  onDisk.accounts[2].credentials.claudeAiOauth.refreshToken = 'b-refresh-ROTATED';
+  const storePath = path.join(os.tmpdir(), `oauth-switch-rotate-test-${process.pid}.json`);
+  fs.writeFileSync(storePath, JSON.stringify(onDisk), 'utf8');
+
+  const { context, calls } = makeSwitchContext(store, {
+    refreshOAuthToken: async (token) => {
+      if (token === 'b-refresh') {
+        const err = new Error('OAuth token refresh returned 400: invalid_grant');
+        err.statusCode = 400;
+        throw err;
+      }
+      // Retry with the newer token succeeds.
+      return { accessToken: 'b-token-NEW', refreshToken: 'b-refresh-NEW2', expiresAt: Date.now() + 3600000 };
+    },
+  });
+  context.options = { storePath };
+  context.readJsonIfExists = readJsonIfExists;
+  context.normalizeStore = normalizeStore;
+  context.storeVersion = '0.2.9';
+
+  await runSwitchAction(context);
+
+  // Stale token failed once, newer token retried once.
+  assert.equal(calls.refresh, 2);
+  // Live state written with the recovered credentials; group not marked dead.
+  assert.equal(calls.live.length, 1);
+  assert.equal(calls.live[0].creds.claudeAiOauth.accessToken, 'b-token-NEW');
+  assert.equal(store.accounts[1].credentialStatus, undefined);
+
+  fs.rmSync(storePath, { force: true });
+});
+
+test('preflight: 400 with no newer on-disk token still blocks and marks', async () => {
+  const fs = require('node:fs');
+  const { normalizeStore } = require('../bin/lib/store/accounts.cjs');
+  const { readJsonIfExists } = require('../bin/lib/store/io.cjs');
+
+  const store = makeStore({ bExpiresAt: Date.now() - 1000 });
+  // On-disk store holds the SAME (stale) token: no newer token to recover with.
+  const storePath = path.join(os.tmpdir(), `oauth-switch-norotate-test-${process.pid}.json`);
+  fs.writeFileSync(storePath, JSON.stringify(makeStore({ bExpiresAt: Date.now() - 1000 })), 'utf8');
+
+  const { context, calls } = makeSwitchContext(store, {
+    refreshOAuthToken: async () => {
+      const err = new Error('OAuth token refresh returned 400: invalid_grant');
+      err.statusCode = 400;
+      throw err;
+    },
+  });
+  context.options = { storePath };
+  context.readJsonIfExists = readJsonIfExists;
+  context.normalizeStore = normalizeStore;
+  context.storeVersion = '0.2.9';
+
+  await assert.rejects(() => runSwitchAction(context), (err) => err.code === 'SWITCH_BLOCKED_REAUTH');
+
+  // No newer token -> no retry; blocked and group marked.
+  assert.equal(calls.refresh, 1);
+  assert.equal(calls.live.length, 0);
+  assert.equal(store.accounts[1].credentialStatus, 'reauth_required');
+
+  fs.rmSync(storePath, { force: true });
+});
+
 test('preflight: network error blocks the switch but does NOT mark the group', async () => {
   const store = makeStore({ bExpiresAt: Date.now() - 1000 });
   const { context, calls } = makeSwitchContext(store, {
