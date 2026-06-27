@@ -25,6 +25,9 @@ class AppState: ObservableObject {
     @Published var trigger7d: Double = 90
     @Published var lastCheckTime: Date?
     @Published var lastSwitchMessage: String?
+    // Status line for the "Capture current browser Claude session" action.
+    @Published var cookieCaptureMessage: String?
+    @Published var isCapturingCookie: Bool = false
     @Published var loadingProviders: Set<ProviderID> = Set(ProviderID.allCases)
     // Default 15 minutes: the timer-driven refresh shells out to `usage` /
     // `codex sync-usage`, and anything more frequent risks usage-API 429
@@ -180,6 +183,22 @@ class AppState: ObservableObject {
         let result = switchService.openCodexManagedLogin()
         lastSwitchMessage = result
         startCodexLoginPolling()
+    }
+
+    // Imports the browser's current claude.ai sessionKey and caches it under the
+    // matching stored account (by email). Cookie-only: never touches OAuth.
+    func captureClaudeBrowserSession() {
+        guard !isCapturingCookie else { return }
+        isCapturingCookie = true
+        cookieCaptureMessage = nil
+        let accounts = claudeAccounts
+        let service = CookieCaptureService()
+        Task { @MainActor [weak self] in
+            let result = await service.capture(accounts: accounts)
+            guard let self else { return }
+            self.cookieCaptureMessage = result.message
+            self.isCapturingCookie = false
+        }
     }
 
     func perform(_ action: ProviderRowAction) {

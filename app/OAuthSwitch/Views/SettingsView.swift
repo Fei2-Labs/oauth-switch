@@ -28,6 +28,23 @@ struct SettingsView: View {
                 Toggle("Auto-refresh expired Kiro accounts", isOn: $appState.autoRefreshExpiredKiro)
             }
 
+            Section("Claude Browser Session") {
+                Button("Capture current browser Claude session") {
+                    appState.captureClaudeBrowserSession()
+                }
+                .disabled(appState.isCapturingCookie)
+
+                if let message = appState.cookieCaptureMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Reads the claude.ai sessionKey from Firefox/Zen and caches it under the matching account in ~/.oauth-switch/cookies.json. Log in to the account in your browser first.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Codex Accounts") {
                 Button("Add Codex Account") {
                     appState.addManagedCodexAccount()
