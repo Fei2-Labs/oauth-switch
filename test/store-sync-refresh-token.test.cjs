@@ -60,6 +60,35 @@ test('live without refreshToken over stored without -> captured as-is', () => {
   assert.equal(oauth.refreshToken, undefined);
 });
 
+test('live with EMPTY accessToken over stored WITH -> preserve stored accessToken + expiresAt', () => {
+  const store = { accounts: [storedAccount({ accessToken: 'good-a', refreshToken: 'good-r', expiresAt: 111 })] };
+  const credentials = liveCreds({ accessToken: '', refreshToken: 'new-r', expiresAt: 0 });
+  const { store: next } = syncStoreFromLive(store, makeConfig(), credentials, deepCopy, STORE_VERSION);
+  const oauth = next.accounts[0].credentials.claudeAiOauth;
+  assert.equal(oauth.accessToken, 'good-a');
+  assert.equal(oauth.expiresAt, 111);
+  assert.equal(oauth.refreshToken, 'new-r');
+});
+
+test('live WITH accessToken over stored WITH -> normal capture (no regression)', () => {
+  const store = { accounts: [storedAccount({ accessToken: 'old-a', refreshToken: 'old-r', expiresAt: 1 })] };
+  const credentials = liveCreds({ accessToken: 'new-a', refreshToken: 'new-r', expiresAt: 2 });
+  const { store: next } = syncStoreFromLive(store, makeConfig(), credentials, deepCopy, STORE_VERSION);
+  const oauth = next.accounts[0].credentials.claudeAiOauth;
+  assert.equal(oauth.accessToken, 'new-a');
+  assert.equal(oauth.expiresAt, 2);
+  assert.equal(oauth.refreshToken, 'new-r');
+});
+
+test('live and stored BOTH empty accessToken -> captured as-is, refreshToken preserved', () => {
+  const store = { accounts: [storedAccount({ accessToken: '', refreshToken: 'good-r' })] };
+  const credentials = liveCreds({ accessToken: '', expiresAt: 0 });
+  const { store: next } = syncStoreFromLive(store, makeConfig(), credentials, deepCopy, STORE_VERSION);
+  const oauth = next.accounts[0].credentials.claudeAiOauth;
+  assert.equal(oauth.accessToken, '');
+  assert.equal(oauth.refreshToken, 'good-r');
+});
+
 test('brand-new account with full creds -> stored fully', () => {
   const store = { accounts: [] };
   const credentials = liveCreds({ accessToken: 'new-a', refreshToken: 'new-r', expiresAt: 5 });

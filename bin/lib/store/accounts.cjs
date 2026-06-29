@@ -225,6 +225,23 @@ function syncStoreFromLive(store, config, credentials, deepCopy, storeVersion) {
     liveOauth.refreshToken = existingOauth.refreshToken;
   }
 
+  // Symmetric guard for the accessToken. During the same rotation window the
+  // live entry can transiently have an empty accessToken (and expiresAt: 0)
+  // while still carrying a refreshToken. Persisting that degraded credential
+  // makes every later switch treat the account as expired, forcing a refresh of
+  // the (already-rotated-past) refreshToken -> 400 invalid_grant -> forced
+  // re-login. Never overwrite a good stored accessToken with a transient empty
+  // one: keep the stored accessToken AND expiresAt while taking the rest live.
+  const liveHasAccess = Boolean(normalizeCredentialValue(liveOauth?.accessToken));
+  const existingHasAccess = Boolean(normalizeCredentialValue(existingOauth?.accessToken));
+  if (liveOauth && !liveHasAccess && existingHasAccess) {
+    console.error(
+      `[oauth-switch] Live credential for ${key} is missing an accessToken; preserving the stored accessToken/expiresAt (likely a transient Keychain state during token rotation).`
+    );
+    liveOauth.accessToken = existingOauth.accessToken;
+    liveOauth.expiresAt = existingOauth.expiresAt;
+  }
+
   // Capturing live credentials means the active account just authenticated, so
   // by definition it does NOT need a re-login. Never carry a pre-existing
   // reauth_required marker forward onto the freshly captured snapshot: a stale
